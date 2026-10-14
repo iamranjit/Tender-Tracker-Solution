@@ -25,7 +25,8 @@ ANALYSE = {
     "eligibility_criteria": [{"criterion": "Turnover", "requirement": "Rs 2.3 lakh", "source": "Bid document"}],
     "mandatory_documents": [{"name": "Undertaking of non-blacklisting", "purpose": "Declaration", "source": "ATC"}],
     "boq": [],
-    "scope": {"summary": "Recruitment software", "objectives": ["Digitise"], "deliverables": ["Software"], "timeline": "90 days", "location": "Bengaluru"},
+    "scope": {"summary": "Recruitment software", "objectives": ["Digitise"], "deliverables": ["Software"], "timeline": "90 days", "location": "Bengaluru",
+              "facts": [{"statement": "11 resources", "basis": "stated", "document": "GeM bid document", "page": "5", "quote": "Number of Resources : 11", "note": ""}]},
     "key_facts": {k: "" for k in ANALYSE_SCHEMA["properties"]["key_facts"]["properties"]},
     "risks": [{"risk": "Past performance gap", "category": "eligibility", "likelihood": "high", "impact": "high", "mitigation": "Seek relaxation"}],
 }
@@ -163,3 +164,50 @@ def test_boq_and_document_matching_helpers():
     assert categorise_requirement("Company PAN card") == "pan"
     assert categorise_requirement("Japan office address") == "other"
     assert match_documents(["GST registration"], [])[0]["status"] == "missing"
+
+
+def test_added_documents_are_read_and_unreadable_links_listed(env):
+    cfg, Session, aid = env
+    sow = cfg.data_dir / "sow.txt"
+    sow.write_text("Scope of Work: deploy 11 resources on-site for 24 months at DESIDOC.", encoding="utf-8")
+    with Session() as s:
+        a = s.get(TenderAnalysis, aid)
+        a.extra_files = [{"name": "SOW.txt", "path": str(sow)}, {"name": "gone.pdf", "path": str(cfg.data_dir / "missing.pdf")}]
+        a.bid.attachments.append(BidAttachment(url="https://bidplus.gem.gov.in/resources/x/sow.pdf", label="Scope of Work",
+                                               kind="sow", status="blocked_by_robots"))  # fmt: skip
+        s.commit()
+    drafter = FakeDrafter()
+    r = _run(env, drafter).result
+    corpus = drafter.calls[0][1][0]
+    assert '<document name="Added by you: SOW.txt">' in corpus and "24 months at DESIDOC" in corpus
+    assert r["unread_documents"][0]["label"] == "Scope of Work"
+    assert any("gone.pdf" in w for w in r["warnings"])
+    assert r["scope"]["facts"][0]["basis"] == "stated"
+
+
+def test_pdf_text_carries_page_markers(tmp_path):
+    from tender_tracker.pdf_parser import PdfContent
+
+    content = PdfContent("a\nb", [], [], ["first page", "second (cid:3)page"])
+    assert content.paged_text() == "[Page 1]\nfirst page\n[Page 2]\nsecond page"
+
+
+def test_boq_fallback_uses_spec_and_consignee_tables():
+    from tender_tracker.boq import boq_from_bid
+    from tender_tracker.pdf_parser import BidDocumentInfo, apply_tables
+
+    info = BidDocumentInfo()
+    apply_tables(info, [
+        [["/ Specification", "/ Values"], ["Type of AI solution", "Chatbots"], ["Input Data Type", "Audio , Image , Structured , Semi-Structured"],
+         ["Model", "As per Service Provider's Solutions"]],
+        [["..../S.N o.", "// /Consignee Reporting/Officer", "/Address", "Quantity", "/Additional Requirement"],
+         ["1", "*****", "*****North Delhi", "Project / Lumpsum Based", "Number of Resources : 11"]],
+    ])  # fmt: skip
+    assert info.consignees == [{"address": "North Delhi", "quantity": "Project / Lumpsum Based", "additional": "Number of Resources : 11"}]
+    sections = [[[r.group, r.name, r.value] for r in s] for s in info.spec_sections]
+    [item] = boq_from_bid("AI as a Service - Development; Audio, Image, Structured, S..", 1, sections, info.consignees)
+    assert item["title"].endswith("(name shortened by GeM)") and ".." not in item["title"]
+    assert "Input Data Type: Audio , Image , Structured , Semi-Structured" in item["description"]
+    assert "As per Service Provider" not in item["description"]  # generic values dropped
+    assert "Number of Resources : 11" in item["description"]
+    assert item["quantity_text"] == "Project / Lumpsum Based" and item["quantity"] is None

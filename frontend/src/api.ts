@@ -146,6 +146,16 @@ export interface AnalysisSummary {
   deadline: string | null;
   missing_documents: number | null;
   requirements: number;
+  added_files: { index: number; name: string }[];
+}
+
+export interface ScopeFact {
+  statement: string;
+  basis: "stated" | "inferred";
+  document: string;
+  page: string;
+  quote: string;
+  note: string;
 }
 
 export interface Requirement {
@@ -184,7 +194,8 @@ export interface AnalysisResult {
   requirements?: Requirement[];
   compliance?: ComplianceRow[];
   documents?: { required: RequiredDocument[]; missing: number; library_count: number };
-  scope?: { summary: string; objectives: string[]; deliverables: string[]; timeline: string; location: string };
+  scope?: { summary: string; objectives: string[]; deliverables: string[]; timeline: string; location: string; facts?: ScopeFact[] };
+  unread_documents?: { label: string; kind: string; url: string; reason: string }[];
   key_facts?: Record<string, string>;
   risks?: { risk: string; category: string; likelihood: string; impact: string; mitigation: string }[];
   proposal?: {
@@ -384,6 +395,27 @@ export interface BidQuery {
   page_size?: number;
 }
 
+export interface AuthUser {
+  id: number;
+  email: string;
+  name: string;
+  role: "admin" | "member";
+  status: "active" | "pending" | "disabled";
+  created_at: string;
+  last_login_at: string | null;
+}
+
+export interface AuthStatus {
+  user: AuthUser | null;
+  needs_setup: boolean;
+  registration: "approval" | "open" | "closed";
+  allowed_email_domains: string[];
+  company: string;
+}
+
+/** Fired when any API call returns 401 (session expired / signed out elsewhere). */
+export const UNAUTHORIZED = "tt:unauthorized";
+
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
     super(message);
@@ -397,6 +429,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: isForm ? init?.headers : { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
+    if (res.status === 401 && !path.startsWith("/api/auth/")) window.dispatchEvent(new Event(UNAUTHORIZED));
     let message = res.statusText;
     try {
       const body = await res.json();
@@ -419,6 +452,20 @@ function qs(params: object): string {
 }
 
 export const api = {
+  authStatus: () => request<AuthStatus>("/api/auth/status"),
+  login: (email: string, password: string, remember: boolean) =>
+    request<{ user: AuthUser }>("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password, remember }) }),
+  register: (name: string, email: string, password: string) =>
+    request<{ user: AuthUser | null; pending: boolean }>("/api/auth/register", { method: "POST", body: JSON.stringify({ name, email, password }) }),
+  logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+  changePassword: (current_password: string, new_password: string) =>
+    request<{ ok: boolean }>("/api/auth/password", { method: "POST", body: JSON.stringify({ current_password, new_password }) }),
+  users: () => request<{ items: AuthUser[]; registration: string }>("/api/users"),
+  createUser: (body: { name: string; email: string; password: string; role: string }) =>
+    request<AuthUser>("/api/users", { method: "POST", body: JSON.stringify(body) }),
+  updateUser: (id: number, body: { status?: string; role?: string }) =>
+    request<AuthUser>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  deleteUser: (id: number) => request<{ deleted: number }>(`/api/users/${id}`, { method: "DELETE" }),
   meta: () => request<Meta>("/api/meta"),
   stats: () => request<Stats>("/api/stats"),
   bids: (q: BidQuery) => request<{ items: BidSummary[]; total: number; page: number; page_size: number }>(`/api/bids${qs(q)}`),
@@ -437,6 +484,10 @@ export const api = {
   createAnalysis: (bidId: number) =>
     request<AnalysisSummary>("/api/analyses", { method: "POST", body: JSON.stringify({ bid_id: bidId }) }),
   uploadTender: (form: FormData) => request<AnalysisSummary>("/api/analyses/upload", { method: "POST", body: form }),
+  addWorkspaceFile: (id: number, form: FormData) =>
+    request<AnalysisSummary>(`/api/analyses/${id}/files`, { method: "POST", body: form }),
+  removeWorkspaceFile: (id: number, index: number) =>
+    request<AnalysisSummary>(`/api/analyses/${id}/files/${index}`, { method: "DELETE" }),
   rerunAnalysis: (id: number) => request<AnalysisSummary>(`/api/analyses/${id}/rerun`, { method: "POST" }),
   deleteAnalysis: (id: number) => request<{ deleted: number }>(`/api/analyses/${id}`, { method: "DELETE" }),
   library: () => request<{ items: LibraryItem[]; categories: { key: string; label: string }[] }>("/api/library"),

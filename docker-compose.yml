@@ -13,7 +13,7 @@ x-common: &common
 services:
   # Web app: REST API + React UI on http://localhost:8000
   # Bound to localhost only - reach it through an SSH tunnel or a reverse proxy (see README),
-  # and set APP_USERNAME / APP_PASSWORD in .env before exposing it.
+  # and create the admin account (first sign-up) before exposing it.
   web:
     <<: *common
     command: ["python", "-m", "tender_tracker", "serve", "--host", "0.0.0.0", "--port", "8000"]

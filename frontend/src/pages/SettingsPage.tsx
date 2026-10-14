@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { api, ChannelStatus, SettingsPayload, SettingsValues } from "../api";
 import { announceSettingsSaved, ErrorBox, rescoreText, Spinner, useAsync } from "../components";
+import { useAuth } from "../auth";
+import { fmtDateTime } from "../format";
 import { inr } from "../format";
 import {
   dpiitHint,
@@ -16,7 +18,7 @@ import {
   yearsSince,
 } from "../identifiers";
 
-type SectionKey = "company" | "search" | "keywords" | "scoring" | "notifications" | "schedule" | "advanced";
+type SectionKey = "company" | "search" | "keywords" | "scoring" | "notifications" | "schedule" | "advanced" | "account" | "users";
 
 const SECTIONS: { key: SectionKey; label: string; hint: string }[] = [
   { key: "company", label: "Company & registrations", hint: "PAN, GST, MSME, DPIIT" },
@@ -26,11 +28,15 @@ const SECTIONS: { key: SectionKey; label: string; hint: string }[] = [
   { key: "notifications", label: "Notifications", hint: "Daily digest" },
   { key: "schedule", label: "Schedule", hint: "When it runs" },
   { key: "advanced", label: "Advanced (YAML)", hint: "Edit the raw file" },
+  { key: "account", label: "Your account", hint: "Password" },
+  { key: "users", label: "Users", hint: "Accounts & access" },
 ];
 
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 
 export default function SettingsPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const loaded = useAsync(() => api.settings(), []);
   const [values, setValues] = useState<SettingsValues | null>(null);
   const [section, setSection] = useState<SectionKey>(() => (location.hash.slice(1) as SectionKey) || "company");
@@ -100,7 +106,7 @@ export default function SettingsPage() {
 
       <div className="settings-layout">
         <nav className="settings-nav card">
-          {SECTIONS.map((s) => (
+          {SECTIONS.filter((s) => s.key !== "users" || isAdmin).map((s) => (
             <button key={s.key} className={section === s.key ? "active" : ""} onClick={() => setSection(s.key)}>
               <span>{s.label}</span>
               <small>{s.hint}</small>
@@ -110,6 +116,11 @@ export default function SettingsPage() {
 
         <div className="stack">
           {status && <div className={`alert ${status.ok ? "info" : "error"}`}>{status.message}</div>}
+          {!isAdmin && section !== "account" && (
+            <div className="alert info">You can view these settings; only an admin can change them.</div>
+          )}
+          {section === "account" && <AccountSection />}
+          {section === "users" && isAdmin && <UsersSection />}
           {section === "company" && <CompanySection v={values} update={update} />}
           {section === "keywords" && <KeywordsSection v={values} update={update} onApplied={loaded.reload} />}
           {section === "scoring" && <ScoringSection v={values} update={update} />}
@@ -122,7 +133,7 @@ export default function SettingsPage() {
         </div>
       </div>
 
-      {dirty && section !== "advanced" && (
+      {dirty && isAdmin && !["advanced", "account", "users"].includes(section) && (
         <div className="save-bar">
           <span><b>Unsaved changes</b></span>
           <div className="row">
@@ -781,5 +792,120 @@ function AdvancedSection({ onSaved, dirty }: { onSaved: () => void; dirty: boole
         <textarea className="code-editor" spellCheck={false} value={text} onChange={(e) => setText(e.target.value)} />
       )}
     </Card>
+  );
+}
+
+function AccountSection() {
+  const { user } = useAuth();
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await api.changePassword(current, next);
+      setMsg({ ok: true, text: "Password changed. Other devices have been signed out." });
+      setCurrent(""); setNext(""); setConfirm("");
+    } catch (e) {
+      setMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Card title="Your account">
+        <div className="kv">
+          <div className="k">Name</div><div className="v">{user?.name}</div>
+          <div className="k">Email</div><div className="v">{user?.email}</div>
+          <div className="k">Role</div><div className="v" style={{ textTransform: "capitalize" }}>{user?.role}</div>
+          <div className="k">Last sign-in</div><div className="v">{fmtDateTime(user?.last_login_at)}</div>
+        </div>
+      </Card>
+      <Card title="Change password" description="At least 8 characters, mixing letters with numbers or symbols. Changing it signs out your other devices.">
+        {msg && <div className={`alert ${msg.ok ? "info" : "error"}`}>{msg.text}</div>}
+        <div className="form-grid">
+          <Field label="Current password"><input className="input" type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} /></Field>
+          <Field label="New password"><input className="input" type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)} /></Field>
+          <Field label="Confirm new password">
+            <input className="input" type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
+            {confirm && confirm !== next && <span className="field-error">Passwords don't match</span>}
+          </Field>
+        </div>
+        <div><button className="btn btn-primary" disabled={busy || !current || next.length < 8 || next !== confirm} onClick={save}>{busy ? <><Spinner /> Saving…</> : "Change password"}</button></div>
+      </Card>
+    </>
+  );
+}
+
+const USER_STATUS_TONE: Record<string, string> = { active: "green", pending: "amber", disabled: "grey" };
+
+function UsersSection() {
+  const { user: me } = useAuth();
+  const users = useAsync(() => api.users(), []);
+  const [error, setError] = useState<unknown>(null);
+  const [form, setForm] = useState({ name: "", email: "", password: "", role: "member" });
+  const [adding, setAdding] = useState(false);
+  const act = async (fn: () => Promise<unknown>) => {
+    setError(null);
+    try { await fn(); users.reload(); } catch (e) { setError(e); }
+  };
+  const pending = users.data?.items.filter((u) => u.status === "pending") ?? [];
+  return (
+    <>
+      <Card title="Users" description={<>New sign-ups: <b>{users.data?.registration ?? "…"}</b> (change <code>auth.registration</code> under Advanced: approval, open or closed).</>}>
+        <ErrorBox error={error} />
+        {pending.length > 0 && <div className="alert warn">{pending.length} account(s) waiting for approval.</div>}
+        <div style={{ overflowX: "auto" }}>
+          <table className="grid">
+            <thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last sign-in</th><th></th></tr></thead>
+            <tbody>
+              {users.data?.items.map((u) => {
+                const self = u.id === me?.id;
+                return (
+                  <tr key={u.id}>
+                    <td><b>{u.name}</b>{self && <span className="muted"> (you)</span>}<div className="muted small">{u.email}</div></td>
+                    <td>
+                      <select className="select" value={u.role} disabled={self} onChange={(e) => act(() => api.updateUser(u.id, { role: e.target.value }))}>
+                        <option value="member">Member</option><option value="admin">Admin</option>
+                      </select>
+                    </td>
+                    <td><span className={`pill ${USER_STATUS_TONE[u.status]}`}>{u.status}</span></td>
+                    <td className="small">{u.last_login_at ? fmtDateTime(u.last_login_at) : "Never"}</td>
+                    <td className="nowrap">
+                      {u.status === "pending" && <button className="btn btn-sm btn-primary" onClick={() => act(() => api.updateUser(u.id, { status: "active" }))}>Approve</button>}
+                      {u.status === "active" && !self && <button className="btn btn-sm" onClick={() => act(() => api.updateUser(u.id, { status: "disabled" }))}>Disable</button>}
+                      {u.status === "disabled" && <button className="btn btn-sm" onClick={() => act(() => api.updateUser(u.id, { status: "active" }))}>Enable</button>}
+                      {!self && <button className="icon-btn" aria-label={`Delete ${u.email}`} onClick={() => { if (window.confirm(`Delete ${u.email}?`)) act(() => api.deleteUser(u.id)); }}>×</button>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+      <Card title="Add a user" description="Creates an active account straight away. Share the password with them securely and ask them to change it.">
+        <div className="form-grid">
+          <Field label="Name"><input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+          <Field label="Email"><input className="input" type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></Field>
+          <Field label="Temporary password"><input className="input" type="text" autoComplete="off" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></Field>
+          <Field label="Role">
+            <select className="select" value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}>
+              <option value="member">Member</option><option value="admin">Admin</option>
+            </select>
+          </Field>
+        </div>
+        <div>
+          <button className="btn btn-primary" disabled={adding || !form.name || !form.email || form.password.length < 8}
+            onClick={async () => { setAdding(true); await act(() => api.createUser(form)); setForm({ name: "", email: "", password: "", role: "member" }); setAdding(false); }}>
+            Add user
+          </button>
+        </div>
+      </Card>
+    </>
   );
 }

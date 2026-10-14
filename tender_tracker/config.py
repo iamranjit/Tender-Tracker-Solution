@@ -142,6 +142,15 @@ class SemanticConfig:
 
 
 @dataclass
+class AuthConfig:
+    """Web app accounts. The first account to register becomes the admin."""
+
+    registration: str = "approval"  # approval (admin approves new accounts) | open | closed
+    allowed_email_domains: list[str] = field(default_factory=list)  # e.g. ["yourcompany.in"]; empty = any
+    session_days: int = 14  # "Keep me signed in"; otherwise sessions last 12 hours
+
+
+@dataclass
 class AIConfig:
     """AI drafting for proposal workspaces (Claude). Needs ANTHROPIC_API_KEY in .env."""
 
@@ -191,6 +200,7 @@ class Config:
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
     ai: AIConfig = field(default_factory=AIConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
     path: Path | None = None
 
     @property
@@ -263,6 +273,7 @@ def config_from_dict(data: dict[str, Any] | None) -> Config:
         "schedule": ScheduleConfig,
         "storage": StorageConfig,
         "ai": AIConfig,
+        "auth": AuthConfig,
     }
     unknown = set(data) - set(sections)
     if unknown:
@@ -274,6 +285,8 @@ def config_from_dict(data: dict[str, Any] | None) -> Config:
     filters.exclude_keywords = [str(k).strip() for k in (filters.exclude_keywords or []) if str(k).strip()]
     if filters.oem_authorization_policy not in {"review", "ignore", "reject"}:
         raise ValueError("filters.oem_authorization_policy must be review, ignore or reject")
+    if built["auth"].registration not in {"approval", "open", "closed"}:
+        raise ValueError("auth.registration must be approval, open or closed")
     if built["ai"].effort not in {"low", "medium", "high", "xhigh", "max"}:
         raise ValueError("ai.effort must be low, medium, high, xhigh or max")
     if not built["search"].terms:

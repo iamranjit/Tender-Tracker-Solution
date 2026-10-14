@@ -1,8 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 import { api } from "./api";
 import { SETTINGS_SAVED, useAsync } from "./components";
 import { Logo } from "./Logo";
+import { useAuth } from "./auth";
+import AuthPage from "./pages/AuthPage";
+import { Spinner } from "./components";
 import BidsPage from "./pages/BidsPage";
 import BidDetailPage from "./pages/BidDetailPage";
 import RunsPage from "./pages/RunsPage";
@@ -12,6 +15,13 @@ import WorkspacePage from "./pages/WorkspacePage";
 import LibraryPage from "./pages/LibraryPage";
 
 export default function App() {
+  const { status, user } = useAuth();
+  if (!status) return <div className="empty"><Spinner /></div>;
+  if (!user) return <AuthPage />;
+  return <SignedInApp />;
+}
+
+function SignedInApp() {
   const meta = useAsync(() => api.meta(), []);
   const c = meta.data?.company;
 
@@ -48,6 +58,7 @@ export default function App() {
               </div>
             </Link>
           )}
+          <UserMenu />
         </div>
       </header>
       <main className="page">
@@ -63,5 +74,35 @@ export default function App() {
         </Routes>
       </main>
     </>
+  );
+}
+
+function UserMenu() {
+  const { user, signOut } = useAuth();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const close = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, []);
+  if (!user) return null;
+  const initials = user.name.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+  return (
+    <div className="user-menu" ref={ref}>
+      <button className="avatar" onClick={() => setOpen(!open)} aria-haspopup="menu" aria-expanded={open} title={user.email}>{initials}</button>
+      {open && (
+        <div className="menu" role="menu">
+          <div className="menu-head">
+            <b>{user.name}</b>
+            <span className="muted small">{user.email}</span>
+            <span className={`pill ${user.role === "admin" ? "blue" : "grey"}`} style={{ alignSelf: "flex-start", marginTop: 4 }}>{user.role}</span>
+          </div>
+          <Link to="/settings#account" role="menuitem" onClick={() => setOpen(false)}>Account & password</Link>
+          {user.role === "admin" && <Link to="/settings#users" role="menuitem" onClick={() => setOpen(false)}>Manage users</Link>}
+          <button role="menuitem" onClick={signOut}>Sign out</button>
+        </div>
+      )}
+    </div>
   );
 }

@@ -99,7 +99,12 @@ export default function WorkspacePage() {
       </div>
 
       <div className="stack">
-        {tab === "overview" && <Overview a={a} r={r} />}
+        {tab === "overview" && (
+          <>
+            <TenderDocuments a={a} r={r} running={running} onChange={ws.reload} onRerun={rerun} />
+            <Overview a={a} r={r} />
+          </>
+        )}
         {tab === "eligibility" && <EligibilityTab r={r} />}
         {tab === "compliance" && <ComplianceTab r={r} />}
         {tab === "boq" && <BoqTab r={r} />}
@@ -337,8 +342,8 @@ function BoqTab({ r }: { r: AnalysisResult }) {
             <tbody>
               {items.map((b, i) => (
                 <tr key={i}>
-                  <td>{b.item_no}</td><td style={{ fontWeight: 500 }}>{b.title}</td><td className="small">{b.description}</td>
-                  <td>{b.quantity ?? b.quantity_text ?? "—"}</td><td>{b.unit}</td><td>{b.delivery}</td>
+                  <td>{b.item_no}</td><td style={{ fontWeight: 500 }}>{b.title}</td><td className="small" style={{ whiteSpace: "pre-line" }}>{b.description}</td>
+                  <td>{b.quantity ?? (b.quantity_text || "—")}</td><td>{b.unit}</td><td>{b.delivery}</td>
                 </tr>
               ))}
             </tbody>
@@ -401,6 +406,25 @@ function ScopeTab({ r }: { r: AnalysisResult }) {
           </>
         )}
       </Section>
+      {s?.facts && s.facts.length > 0 && (
+        <Section title="Key facts and sources" hint="Stated = quoted from the tender · Inferred = check before relying on it">
+          <div style={{ overflowX: "auto" }}>
+            <table className="grid">
+              <thead><tr><th style={{ width: "28%" }}>Fact</th><th>Basis</th><th>Source</th><th style={{ width: "34%" }}>Quote</th></tr></thead>
+              <tbody>
+                {s.facts.map((f, i) => (
+                  <tr key={i}>
+                    <td style={{ fontWeight: 500 }}>{f.statement}{f.note && <div className="small warn-text" style={{ marginTop: 4 }}>{f.note}</div>}</td>
+                    <td><span className={`pill ${f.basis === "stated" ? "green" : "amber"}`}>{f.basis === "stated" ? "Stated" : "Inferred"}</span></td>
+                    <td className="small">{f.document}{f.page && <div className="muted">page {f.page}</div>}</td>
+                    <td className="small"><q className="quote">{f.quote}</q></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      )}
       <Section title="Solution architecture">
         <NeedsAI r={r} stage="proposal" />
         {arch && (
@@ -526,5 +550,80 @@ function ProposalTab({ r }: { r: AnalysisResult }) {
         </Section>
       )}
     </>
+  );
+}
+
+function TenderDocuments({ a, r, running, onChange, onRerun }: {
+  a: AnalysisDetail; r: AnalysisResult; running: boolean; onChange: () => void; onRerun: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [added, setAdded] = useState(false);
+  const unread = r.unread_documents ?? [];
+  const sources = r.sources ?? [];
+
+  const upload = async (file: File | undefined) => {
+    if (!file) return;
+    setBusy(true);
+    setError(null);
+    const form = new FormData();
+    form.append("file", file);
+    try {
+      await api.addWorkspaceFile(a.id, form);
+      setAdded(true);
+      onChange();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section title="Tender documents" hint="What the drafts are based on">
+      {sources.length > 0 && (
+        <>
+          <div className="section-label" style={{ marginTop: 0 }}>Read</div>
+          <div className="row" style={{ marginBottom: 6 }}>
+            {sources.map((x) => <span key={x.name} className="chip">✓ {x.name}</span>)}
+          </div>
+        </>
+      )}
+      {unread.length > 0 && (
+        <>
+          <div className="section-label">Not read — download these from GeM and add them below</div>
+          {unread.map((u) => (
+            <div key={u.url} className="att">
+              <div>
+                <div className="name">{u.label}</div>
+                <div className="status"><span className="res check" style={{ fontWeight: 500 }}>{u.reason}</span></div>
+              </div>
+              <a className="btn btn-sm" href={u.url} target="_blank" rel="noreferrer">Open on GeM ↗</a>
+            </div>
+          ))}
+        </>
+      )}
+      <div className="section-label">Added by you</div>
+      {a.added_files.length === 0 && <div className="muted small" style={{ marginBottom: 8 }}>None yet. Text PDFs, DOCX and TXT work; scanned PDFs can't be read.</div>}
+      {a.added_files.map((f) => (
+        <div key={f.index} className="row" style={{ justifyContent: "space-between", padding: "4px 0" }}>
+          <span>📄 {f.name}</span>
+          <button className="icon-btn" aria-label={`Remove ${f.name}`} disabled={running}
+            onClick={async () => { await api.removeWorkspaceFile(a.id, f.index); onChange(); }}>×</button>
+        </div>
+      ))}
+      <div className="row" style={{ marginTop: 8 }}>
+        <label className="btn btn-sm" style={{ position: "relative", overflow: "hidden" }}>
+          {busy ? <><Spinner /> Uploading…</> : "+ Add a tender document"}
+          <input type="file" accept=".pdf,.docx,.xlsx,.csv,.txt" disabled={busy || running}
+            style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer" }}
+            onChange={(e) => { upload(e.target.files?.[0]); e.target.value = ""; }} />
+        </label>
+        {added && !running && (
+          <button className="btn btn-sm btn-primary" onClick={() => { setAdded(false); onRerun(); }}>Re-generate with added documents</button>
+        )}
+      </div>
+      <ErrorBox error={error} />
+    </Section>
   );
 }

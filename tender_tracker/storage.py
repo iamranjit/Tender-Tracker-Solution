@@ -119,6 +119,7 @@ class BidDocument(Base):
     atc_text: Mapped[str | None] = mapped_column(Text)
     spec_sections: Mapped[list[Any] | None] = mapped_column(JSON)
     details: Mapped[list[Any] | None] = mapped_column(JSON)
+    consignees: Mapped[list[Any] | None] = mapped_column(JSON)
     parser_version: Mapped[int | None] = mapped_column(Integer)
     fields: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     warnings: Mapped[list[str] | None] = mapped_column(JSON)
@@ -170,6 +171,32 @@ class BidAttachment(Base):
     bid: Mapped[Bid] = relationship(back_populates="attachments")
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(16), default="member")  # admin | member
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # active | pending | disabled
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    ip: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(String(255))
+
+
 class CompanyDocument(Base):
     """Company capability documents and previous proposals (the document library)."""
 
@@ -204,6 +231,8 @@ class TenderAnalysis(Base):
     source: Mapped[str] = mapped_column(String(16))  # gem | upload
     title: Mapped[str] = mapped_column(Text)
     file_path: Mapped[str | None] = mapped_column(String(512))
+    # documents the user added (e.g. a SOW downloaded from GeM that the tracker can't fetch): [{name, path}]
+    extra_files: Mapped[list[Any] | None] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(16), default="queued")  # queued | running | done | failed
     stage: Mapped[str | None] = mapped_column(String(64))
     progress: Mapped[dict[str, Any] | None] = mapped_column(JSON)
@@ -396,6 +425,7 @@ def save_document(
         setattr(doc, name, getattr(info, name))
     doc.spec_sections = [[[r.group, r.name, r.value] for r in section] for section in info.spec_sections]
     doc.details = [list(pair) for pair in info.details]
+    doc.consignees = info.consignees
     doc.parser_version = PARSER_VERSION
     doc.fields = info.to_dict()
     doc.warnings = info.warnings

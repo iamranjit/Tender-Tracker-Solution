@@ -34,7 +34,10 @@ storage: {{database_url: "sqlite:///{(tmp_path / 't.db').as_posix()}", data_dir:
 
     api = importlib.reload(api_module)
     seed(api)
-    return TestClient(api.app)
+    client = TestClient(api.app)
+    r = client.post("/api/auth/register", json={"name": "Admin", "email": "admin@acme.in", "password": "Secret123"})
+    assert r.status_code == 200 and r.json()["user"]["role"] == "admin"  # first account = admin, signed in
+    return client
 
 
 def seed(api) -> None:
@@ -91,12 +94,61 @@ def test_config_is_validated_before_saving(client):
     assert client.get("/api/config").json()["text"] == original
 
 
-def test_basic_auth(client, monkeypatch):
-    monkeypatch.setenv("APP_USERNAME", "admin")
-    monkeypatch.setenv("APP_PASSWORD", "s3cret")
+def test_login_registration_and_roles(client):
+    import tender_tracker.api as api
+    from fastapi.testclient import TestClient
+
+    anon = TestClient(api.app)
+    assert anon.get("/api/bids").status_code == 401
+    assert anon.get("/api/health").status_code == 200
+    status = anon.get("/api/auth/status").json()
+    assert status["user"] is None and not status["needs_setup"] and status["registration"] == "approval"
+
+    # weak passwords and duplicate emails are refused
+    assert anon.post("/api/auth/register", json={"name": "B", "email": "bob@acme.in", "password": "short"}).status_code == 400
+    assert anon.post("/api/auth/register", json={"name": "A", "email": "ADMIN@acme.in", "password": "Another123"}).status_code == 400
+
+    # later sign-ups wait for approval and can't log in yet
+    r = anon.post("/api/auth/register", json={"name": "Bob", "email": "bob@acme.in", "password": "Bobpass123"})
+    assert r.json() == {"user": None, "pending": True}
+    assert "approve" in anon.post("/api/auth/login", json={"email": "bob@acme.in", "password": "Bobpass123"}).json()["detail"]
+
+    users = client.get("/api/users").json()["items"]
+    bob = next(u for u in users if u["email"] == "bob@acme.in")
+    assert bob["status"] == "pending"
+    client.patch(f"/api/users/{bob['id']}", json={"status": "active"})
+
+    assert anon.post("/api/auth/login", json={"email": "bob@acme.in", "password": "wrong-pass1"}).status_code == 400
+    r = anon.post("/api/auth/login", json={"email": "Bob@Acme.in", "password": "Bobpass123"})
+    assert r.status_code == 200 and anon.get("/api/bids").status_code == 200
+    # members can work with tenders but not change settings or users
+    assert anon.put("/api/settings", json={"values": {}}).status_code == 403
+    assert anon.get("/api/users").status_code == 403
+
+    # disabling a user ends their session immediately
+    client.patch(f"/api/users/{bob['id']}", json={"status": "disabled"})
+    assert anon.get("/api/bids").status_code == 401
+
+    # admins can't lock themselves out
+    me = client.get("/api/auth/status").json()["user"]
+    assert client.patch(f"/api/users/{me['id']}", json={"status": "disabled"}).status_code == 400
+
+    # cross-site writes are blocked; logout ends the session
+    assert client.post("/api/runs", json={}, headers={"Origin": "https://evil.example"}).status_code == 403
+    client.post("/api/auth/logout")
     assert client.get("/api/bids").status_code == 401
-    assert client.get("/api/bids", auth=("admin", "s3cret")).status_code == 200
-    assert client.get("/api/health").status_code == 200
+
+
+def test_password_hashing_and_change(client):
+    from tender_tracker.auth import hash_password, verify_password
+
+    h = hash_password("Secret123")
+    assert h.startswith("scrypt$") and "Secret123" not in h
+    assert verify_password("Secret123", h) and not verify_password("secret123", h)
+    assert client.post("/api/auth/password", json={"current_password": "nope", "new_password": "Newpass123"}).status_code == 400
+    assert client.post("/api/auth/password", json={"current_password": "Secret123", "new_password": "Newpass123"}).status_code == 200
+    client.post("/api/auth/logout")
+    assert client.post("/api/auth/login", json={"email": "admin@acme.in", "password": "Newpass123"}).status_code == 200
 
 
 def test_extract_csv_and_html_text():

@@ -93,3 +93,47 @@ def boq_from_listing(items_text: str, quantity: int | None) -> list[dict[str, An
          "quantity_text": "", "unit": "", "delivery": "", "source": "GeM listing"}
         for i, n in enumerate(names, 1)
     ]  # fmt: skip
+
+
+_GENERIC_VALUE = re.compile(r"^as per (the )?(service provider|bidder|seller|buyer)", re.I)
+
+
+def boq_from_bid(
+    items_text: str,
+    quantity: int | None,
+    spec_sections: list[list[Any]] | None,
+    consignees: list[dict[str, str]] | None,
+) -> list[dict[str, Any]]:
+    """BoQ for bids without a BoQ file: item names plus the bid PDF's specification and consignee tables.
+
+    GeM shortens long category names ("... Structured, S.."); the specification
+    table holds the full detail, and for services the consignee table holds the
+    real quantity ("Project / Lumpsum Based", "Number of Resources : 11").
+    """
+    items = boq_from_listing(items_text, quantity)
+    if not items:
+        return items
+    sections = spec_sections or []
+    if len(items) == 1:
+        per_item = [[row for section in sections for row in section]]
+    elif len(sections) == len(items):
+        per_item = sections
+    else:
+        per_item = [[] for _ in items]
+    consignees = consignees or []
+    qty_text = "; ".join(dict.fromkeys(c["quantity"] for c in consignees if c.get("quantity")))
+    extra = "; ".join(dict.fromkeys(c["additional"] for c in consignees if c.get("additional")))
+    for item, rows in zip(items, per_item):
+        if item["title"].endswith(".."):
+            item["title"] = item["title"][:-2].rstrip(" ,;") + "… (name shortened by GeM)"
+        lines = [f"{name}: {value}" for _, name, value in rows if name and value and not _GENERIC_VALUE.match(value)]
+        if len(items) == 1:
+            if extra:
+                lines.append(extra)
+            if qty_text:
+                item["quantity_text"] = qty_text
+                if not re.fullmatch(r"[\d.,\s]+", qty_text):
+                    item["quantity"] = None  # "Project / Lumpsum Based" is not a count
+        item["description"] = "\n".join(lines)
+        item["source"] = "GeM bid document"
+    return items

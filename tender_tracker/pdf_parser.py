@@ -29,7 +29,7 @@ from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
 
-PARSER_VERSION = 2
+PARSER_VERSION = 3
 
 INDIAN_STATES = [
     "Andhra Pradesh", "Arunachal Pradesh", "Assam", "Bihar", "Chhattisgarh", "Goa", "Gujarat",
@@ -131,6 +131,7 @@ class BidDocumentInfo:
     atc_text: str | None = None
     attachments: list[Attachment] = field(default_factory=list)
     details: list[tuple[str, str]] = field(default_factory=list)  # every label/value pair in the bid grid
+    consignees: list[dict[str, str]] = field(default_factory=list)  # address / quantity / additional requirement
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -186,6 +187,11 @@ class PdfContent:
     text: str
     tables: list[list[list[str]]]
     links: list[str]
+    pages: list[str] = field(default_factory=list)  # raw text per page
+
+    def paged_text(self) -> str:
+        """Cleaned text with "[Page N]" markers, so AI drafts can cite page numbers."""
+        return "\n".join(f"[Page {i}]\n{clean_text(t)}" for i, t in enumerate(self.pages, 1))
 
 
 def read_pdf(pdf_path: str | Path, max_pages: int | None = None) -> PdfContent:
@@ -204,7 +210,7 @@ def read_pdf(pdf_path: str | Path, max_pages: int | None = None) -> PdfContent:
                 uri = link.get("uri")
                 if uri and uri not in links:
                     links.append(uri)
-    return PdfContent("\n".join(texts), tables, links)
+    return PdfContent("\n".join(texts), tables, links, texts)
 
 
 def extract_text(pdf_path: str | Path, max_pages: int | None = None) -> str:
@@ -463,6 +469,35 @@ def _is_spec_header(row: list[str]) -> bool:
     )
 
 
+def _parse_consignees(info: BidDocumentInfo, table: list[list[str]]) -> bool:
+    """Consignee table: "S.No | Consignee | Address | Quantity | Additional Requirement".
+
+    Services bids put the real quantity here ("Project / Lumpsum Based",
+    "Number of Resources : 11"). Returns True if the table was a consignee table.
+    """
+    header = [_norm_label(c).lower() for c in table[0]]
+    if not (any("consignee" in h for h in header) and any(h.startswith("quantity") or "quantity" in h for h in header)):
+        return False
+
+    def col(word: str) -> int | None:
+        return next((i for i, h in enumerate(header) if word in h), None)
+
+    address, quantity, extra = col("address"), col("quantity"), col("additional")
+    for row in table[1:]:
+        cells = [_clean_cell(c) for c in row]
+        get = lambda i: cells[i] if i is not None and i < len(cells) else ""  # noqa: E731
+        if not any(cells):
+            continue
+        info.consignees.append(
+            {
+                "address": re.sub(r"\*+", " ", get(address)).strip(),
+                "quantity": get(quantity),
+                "additional": get(extra),
+            }
+        )
+    return True
+
+
 def apply_tables(info: BidDocumentInfo, tables: list[list[list[str]]]) -> None:
     """Overlay values read from the PDF's tables, which are more reliable than text regexes."""
     details: list[tuple[str, str]] = []
@@ -488,6 +523,8 @@ def apply_tables(info: BidDocumentInfo, tables: list[list[list[str]]]) -> None:
                     section.append(SpecRow(group=group, name=name, value=value))
             if section:
                 sections.append(section)
+            continue
+        if _parse_consignees(info, table):
             continue
         for row in table:
             if len(row) != 2:

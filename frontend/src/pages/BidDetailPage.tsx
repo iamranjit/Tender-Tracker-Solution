@@ -280,7 +280,7 @@ function ScopeOfWork({ bid, onAttachments }: { bid: BidDetail; onAttachments: (a
               <tbody>
                 {bid.boq.map((b, i) => (
                   <tr key={i}>
-                    <td>{b.item_no}</td><td style={{ fontWeight: 500 }}>{b.title}</td><td className="small">{b.description}</td>
+                    <td>{b.item_no}</td><td style={{ fontWeight: 500 }}>{b.title}</td><td className="small" style={{ whiteSpace: "pre-line" }}>{b.description}</td>
                     <td>{b.quantity ?? (b.quantity_text || "—")}</td><td>{b.unit}</td>
                   </tr>
                 ))}

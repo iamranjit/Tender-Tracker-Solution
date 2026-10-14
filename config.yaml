@@ -219,3 +219,9 @@ ai:
   effort: high                  # low | medium | high | xhigh | max
   max_corpus_chars: 1500000     # tender text per workspace (~400k tokens)
   proposals_for_reference: 2    # similar previous proposals included as reference
+
+auth:
+  # Web app accounts. The first person to register becomes the admin.
+  registration: approval        # approval (an admin approves new accounts) | open | closed
+  allowed_email_domains: []     # e.g. ["yourcompany.in"] - empty allows any email
+  session_days: 14              # "Keep me signed in" duration; otherwise 12 hours

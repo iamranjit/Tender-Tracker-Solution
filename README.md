@@ -44,7 +44,16 @@ Every morning this tool looks through the open bids on the Government e-Marketpl
 2. Linked documents on hosts whose robots.txt allows access. In practice that is `mkp.gem.gov.in` (BoQ and specification files; the BoQ CSV lists each item with a full description) and `fulfilment.gem.gov.in`/`bidplus…/bidsla` (SOW and service terms). PDF, CSV, XLSX and HTML are converted to text. This happens automatically for shortlisted bids, and on demand with *Read documents now*.
 3. Buyer uploads under `bidplus.gem.gov.in/resources/…`. GeM's robots.txt disallows this path, so these are shown as **links you open yourself** and are never downloaded by the tracker. Scanned PDFs (images only) are flagged the same way, since no text can be extracted.
 
-**Login.** Set `APP_USERNAME` and `APP_PASSWORD` in `.env` to require HTTP Basic auth on everything except `/api/health`.
+**Accounts and sign-in.**
+- **First account:** the first person to open the app and register becomes the **admin**. Do this straight after installing.
+- **New sign-ups:** set by `auth.registration` in `config.yaml`:
+  - `approval` (default): new accounts wait until an admin approves them under **Settings → Users**;
+  - `open`: anyone who registers can sign in straight away;
+  - `closed`: only admins can create accounts.
+- **Email restriction:** optionally limit sign-ups to your domain with `auth.allowed_email_domains: ["yourcompany.in"]`.
+- **Roles:** admins can change settings and manage users. Members can use everything else: tenders, feedback, proposal workspaces and the library.
+- **Security:** passwords are stored as scrypt hashes. Sessions use an HttpOnly, SameSite cookie that lasts 12 hours, or 14 days with "Keep me signed in". Sign-in locks for 15 minutes after repeated failures, and cross-site write requests are rejected.
+- **Recovery:** if every admin is locked out, run `python -m tender_tracker create-user --email you@co.in --admin`, or `reset-password --email you@co.in`, on the server.
 
 ## How the GeM data is fetched
 
@@ -223,7 +232,7 @@ docker compose run --rm app run --no-notify  # optional first run now
 docker compose logs -f scheduler
 ```
 
-- The web app only listens on `127.0.0.1:8000`. Open it through an SSH tunnel (`ssh -L 8000:localhost:8000 user@vps`, then browse to http://localhost:8000), or set `APP_USERNAME`/`APP_PASSWORD` and put Caddy in front for HTTPS (`tenders.yourco.in { reverse_proxy localhost:8000 }`). **Don't expose it publicly without a login**, because it can edit your config and trigger runs.
+- The web app only listens on `127.0.0.1:8000`. Open it through an SSH tunnel (`ssh -L 8000:localhost:8000 user@vps`, then browse to http://localhost:8000), or register the admin account first and put Caddy in front for HTTPS (`tenders.yourco.in { reverse_proxy localhost:8000 }`). **Don't expose it publicly without a login**, because it can edit your config and trigger runs.
 - To back up, copy `data/tender_tracker.db` (for example with a nightly `sqlite3 … ".backup"` from cron).
 - To use PostgreSQL, set `DATABASE_URL=postgresql+psycopg2://…` in `.env` and uncomment `psycopg2-binary` in `requirements.txt`.
 

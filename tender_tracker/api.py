@@ -3,16 +3,14 @@
 Run:  uvicorn tender_tracker.api:app --host 0.0.0.0 --port 8000
       (or: python -m tender_tracker serve)
 
-Optional HTTP Basic auth: set APP_USERNAME and APP_PASSWORD in .env.
+Every /api/ call needs a signed-in user (see auth.py); the first account registered becomes the admin.
 """
 
 from __future__ import annotations
 
-import base64
 import logging
 import os
 import re
-import secrets
 import threading
 import uuid
 from datetime import datetime, timedelta
@@ -39,6 +37,19 @@ from .config import (
     update_config_values,
 )
 from .ai import ai_status
+from .auth import (
+    COOKIE,
+    AuthError,
+    change_password,
+    create_user,
+    login,
+    logout,
+    public_user,
+    register,
+    revoke_sessions,
+    user_count,
+    user_for_token,
+)
 from .notifier import build_channels, channel_status
 from .fetcher import GemClient
 from .filter_scorer import (
@@ -108,20 +119,203 @@ app = FastAPI(title="GeM Tender Tracker", version="2.0", docs_url="/api/docs", o
 
 
 @app.middleware("http")
-async def basic_auth(request: Request, call_next):
-    user, password = env("APP_USERNAME"), env("APP_PASSWORD")
-    if user and password and request.url.path != "/api/health":
-        header = request.headers.get("Authorization", "")
-        ok = False
-        if header.startswith("Basic "):
-            try:
-                given_user, _, given_pw = base64.b64decode(header[6:]).decode().partition(":")
-                ok = secrets.compare_digest(given_user, user) and secrets.compare_digest(given_pw, password)
-            except (ValueError, UnicodeDecodeError):
-                ok = False
-        if not ok:
-            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="GeM Tender Tracker"'})
+async def require_login(request: Request, call_next):
+    """Every /api/ call needs a signed-in user, except sign-in, registration and the health check."""
+    path = request.url.path
+    if path.startswith("/api/") and path not in PUBLIC_API:
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not _same_origin(request):
+            return JSONResponse({"detail": "Cross-site request blocked"}, status_code=403)
+        with _sessions()() as session:
+            user = user_for_token(session, request.cookies.get(COOKIE))
+            if user is None:
+                return JSONResponse({"detail": "Please sign in"}, status_code=401)
+            request.state.user = public_user(user)
     return await call_next(request)
+
+
+PUBLIC_API = {"/api/health", "/api/auth/status", "/api/auth/login", "/api/auth/register"}
+
+
+def _same_origin(request: Request) -> bool:
+    """CSRF guard for cookie auth: a browser sends Origin on cross-site writes; it must match our host."""
+    origin = request.headers.get("origin")
+    if not origin:
+        return True  # same-origin fetches from older browsers / non-browser clients
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+    return origin.split("://", 1)[-1].rstrip("/") == host
+
+
+def current_user(request: Request) -> dict[str, Any]:
+    return request.state.user
+
+
+def require_admin(request: Request) -> dict[str, Any]:
+    user = request.state.user
+    if user["role"] != "admin":
+        raise HTTPException(403, "Only an admin can do this")
+    return user
+
+
+def _set_session_cookie(response: Response, request: Request, token: str, expires: datetime | None) -> None:
+    response.set_cookie(
+        COOKIE,
+        token,
+        httponly=True,
+        samesite="lax",
+        secure=request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https",
+        expires=None if expires is None else int((expires - now_ist()).total_seconds()),
+        path="/",
+    )
+
+
+class RegisterIn(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class LoginIn(BaseModel):
+    email: str
+    password: str
+    remember: bool = True
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    cfg = get_config().auth
+    user = user_for_token(session, request.cookies.get(COOKIE))
+    return {
+        "user": public_user(user) if user else None,
+        "needs_setup": user_count(session) == 0,
+        "registration": cfg.registration,
+        "allowed_email_domains": cfg.allowed_email_domains,
+        "company": get_config().company.name,
+    }
+
+
+@app.post("/api/auth/register")
+def auth_register(body: RegisterIn, request: Request, response: Response, session: Session = Depends(get_session)) -> dict[str, Any]:
+    try:
+        user = register(session, get_config().auth, name=body.name, email=body.email, password=body.password)
+    except AuthError as exc:
+        raise HTTPException(400, str(exc)) from None
+    if user.status != "active":
+        return {"user": None, "pending": True}
+    user, token, expires = login(
+        session, get_config().auth, email=body.email, password=body.password, remember=True,
+        ip=request.client.host if request.client else "", user_agent=request.headers.get("user-agent", ""),
+    )  # fmt: skip
+    _set_session_cookie(response, request, token, expires)
+    return {"user": public_user(user), "pending": False}
+
+
+@app.post("/api/auth/login")
+def auth_login(body: LoginIn, request: Request, response: Response, session: Session = Depends(get_session)) -> dict[str, Any]:
+    try:
+        user, token, expires = login(
+            session, get_config().auth, email=body.email, password=body.password, remember=body.remember,
+            ip=request.client.host if request.client else "", user_agent=request.headers.get("user-agent", ""),
+        )  # fmt: skip
+    except AuthError as exc:
+        raise HTTPException(400, str(exc)) from None
+    _set_session_cookie(response, request, token, expires if body.remember else None)
+    return {"user": public_user(user)}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response, session: Session = Depends(get_session)) -> dict[str, Any]:
+    logout(session, request.cookies.get(COOKIE))
+    response.delete_cookie(COOKIE, path="/")
+    return {"ok": True}
+
+
+class PasswordIn(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/api/auth/password")
+def auth_change_password(body: PasswordIn, request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    from .storage import User
+
+    user = session.get(User, current_user(request)["id"])
+    try:
+        change_password(session, user, body.current_password, body.new_password, request.cookies.get(COOKIE))
+    except AuthError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {"ok": True}
+
+
+# -- user management (admin) ----------------------------------------------------------------
+
+
+@app.get("/api/users")
+def list_users(admin: dict = Depends(require_admin), session: Session = Depends(get_session)) -> dict[str, Any]:
+    from .storage import User
+
+    users = session.scalars(select(User).order_by(User.status != "pending", User.created_at))
+    return {"items": [public_user(u) for u in users], "registration": get_config().auth.registration}
+
+
+class UserCreateIn(BaseModel):
+    name: str
+    email: str
+    password: str
+    role: str = "member"
+
+
+@app.post("/api/users", status_code=201)
+def admin_create_user(body: UserCreateIn, admin: dict = Depends(require_admin), session: Session = Depends(get_session)) -> dict[str, Any]:
+    if body.role not in ("admin", "member"):
+        raise HTTPException(400, "role must be admin or member")
+    try:
+        user = create_user(session, name=body.name, email=body.email, password=body.password, role=body.role)
+    except AuthError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return public_user(user)
+
+
+class UserUpdateIn(BaseModel):
+    status: str | None = None
+    role: str | None = None
+
+
+@app.patch("/api/users/{user_id}")
+def update_user(user_id: int, body: UserUpdateIn, admin: dict = Depends(require_admin), session: Session = Depends(get_session)) -> dict[str, Any]:
+    from .storage import User
+
+    user = session.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "User not found")
+    if user.id == admin["id"] and (body.status not in (None, "active") or body.role not in (None, "admin")):
+        raise HTTPException(400, "You can't disable or demote your own account")
+    if body.status is not None:
+        if body.status not in ("active", "disabled"):
+            raise HTTPException(400, "status must be active or disabled")
+        user.status = body.status
+    if body.role is not None:
+        if body.role not in ("admin", "member"):
+            raise HTTPException(400, "role must be admin or member")
+        user.role = body.role
+    session.commit()
+    if user.status != "active":
+        revoke_sessions(session, user.id)
+    return public_user(user)
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(user_id: int, admin: dict = Depends(require_admin), session: Session = Depends(get_session)) -> dict[str, Any]:
+    from .storage import User
+
+    user = session.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "User not found")
+    if user.id == admin["id"]:
+        raise HTTPException(400, "You can't delete your own account")
+    revoke_sessions(session, user.id)
+    session.delete(user)
+    session.commit()
+    return {"deleted": user_id}
 
 
 # -- helpers ------------------------------------------------------------------------------
@@ -571,7 +765,7 @@ def read_config() -> dict[str, str]:
 
 
 @app.put("/api/config")
-def write_config(body: ConfigIn) -> dict[str, Any]:
+def write_config(body: ConfigIn, admin: dict = Depends(require_admin)) -> dict[str, Any]:
     try:
         save_config_text(CONFIG_PATH, body.text)
     except Exception as exc:
@@ -616,7 +810,7 @@ class SettingsIn(BaseModel):
 
 
 @app.put("/api/settings")
-def write_settings(body: SettingsIn) -> dict[str, Any]:
+def write_settings(body: SettingsIn, admin: dict = Depends(require_admin)) -> dict[str, Any]:
     """Partial update of config.yaml. Only the config file is written - stored bids are never touched."""
     allowed = set(config_values(load_config(CONFIG_PATH)))
     unknown = set(body.values) - allowed
@@ -635,7 +829,7 @@ class TestNotifyIn(BaseModel):
 
 
 @app.post("/api/settings/test-notify")
-def test_notify(body: TestNotifyIn) -> dict[str, Any]:
+def test_notify(body: TestNotifyIn, admin: dict = Depends(require_admin)) -> dict[str, Any]:
     """Send a short test message through each configured channel (or one of them)."""
     cfg = load_config(CONFIG_PATH)
     results = []
@@ -678,7 +872,7 @@ class TermsIn(BaseModel):
 
 
 @app.post("/api/suggestions/apply")
-def apply_suggestions(body: TermsIn) -> dict[str, Any]:
+def apply_suggestions(body: TermsIn, admin: dict = Depends(require_admin)) -> dict[str, Any]:
     added = add_exclude_keywords(CONFIG_PATH, [t.strip() for t in body.terms if t.strip()])
     return {"added": added, "rescore": _after_config_change()}
 
@@ -734,6 +928,7 @@ def _analysis_summary(a: TenderAnalysis) -> dict[str, Any]:
         "deadline": (r.get("summary") or {}).get("bid_end") or (r.get("key_facts") or {}).get("submission_deadline"),
         "missing_documents": (r.get("documents") or {}).get("missing"),
         "requirements": len(r.get("requirements") or []),
+        "added_files": [{"index": i, "name": f["name"]} for i, f in enumerate(a.extra_files or [])],
     }
 
 
@@ -806,6 +1001,42 @@ def get_analysis(analysis_id: int, session: Session = Depends(get_session)) -> d
     return {**_analysis_summary(a), "result": result, "model": a.model, "corpus_chars": a.corpus_chars}
 
 
+@app.post("/api/analyses/{analysis_id}/files", status_code=201)
+async def add_workspace_file(
+    analysis_id: int, file: UploadFile = File(...), session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Add a tender document the tracker couldn't fetch itself (e.g. a SOW downloaded from GeM)."""
+    from .library import MAX_UPLOAD_BYTES, _safe_name
+
+    a = _get_analysis(session, analysis_id)
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "The file is empty")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"File is larger than {MAX_UPLOAD_BYTES // 1_000_000} MB")
+    folder = get_config().data_dir / "tenders" / f"workspace-{a.id}"
+    folder.mkdir(parents=True, exist_ok=True)
+    name = Path(file.filename or "document").name
+    path = folder / f"{uuid.uuid4().hex[:8]}_{_safe_name(name)}"
+    path.write_bytes(content)
+    a.extra_files = [*(a.extra_files or []), {"name": name, "path": str(path)}]
+    session.commit()
+    return _analysis_summary(a)
+
+
+@app.delete("/api/analyses/{analysis_id}/files/{index}")
+def remove_workspace_file(analysis_id: int, index: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    a = _get_analysis(session, analysis_id)
+    files = list(a.extra_files or [])
+    if not 0 <= index < len(files):
+        raise HTTPException(404, "File not found")
+    removed = files.pop(index)
+    Path(removed["path"]).unlink(missing_ok=True)
+    a.extra_files = files
+    session.commit()
+    return _analysis_summary(a)
+
+
 @app.post("/api/analyses/{analysis_id}/rerun", status_code=202)
 def rerun_analysis(analysis_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
     a = _get_analysis(session, analysis_id)
@@ -822,6 +1053,8 @@ def delete_analysis(analysis_id: int, session: Session = Depends(get_session)) -
         raise HTTPException(409, "Wait for generation to finish before deleting")
     if a.file_path:
         Path(a.file_path).unlink(missing_ok=True)
+    for f in a.extra_files or []:
+        Path(f["path"]).unlink(missing_ok=True)
     session.delete(a)
     session.commit()
     return {"deleted": analysis_id}

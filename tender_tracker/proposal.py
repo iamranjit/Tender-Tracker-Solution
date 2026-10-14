@@ -28,7 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from .ai import AIError, Drafter, ai_status
-from .boq import boq_from_listing, find_boq
+from .boq import boq_from_bid, find_boq
 from .config import Config, now_ist
 from .extract import extract
 from .filter_scorer import check_eligibility, eligibility_checklist
@@ -76,7 +76,28 @@ ANALYSE_SCHEMA = _obj(
         "eligibility_criteria": {"type": "array", "items": _obj({"criterion": _S, "requirement": _S, "source": _S})},
         "mandatory_documents": {"type": "array", "items": _obj({"name": _S, "purpose": _S, "source": _S})},
         "boq": {"type": "array", "items": _obj({"item_no": _S, "title": _S, "description": _S, "quantity_text": _S, "unit": _S})},
-        "scope": _obj({"summary": _S, "objectives": _LIST_S, "deliverables": _LIST_S, "timeline": _S, "location": _S}),
+        "scope": _obj(
+            {
+                "summary": _S,
+                "objectives": _LIST_S,
+                "deliverables": _LIST_S,
+                "timeline": _S,
+                "location": _S,
+                "facts": {
+                    "type": "array",
+                    "items": _obj(
+                        {
+                            "statement": _S,
+                            "basis": {"type": "string", "enum": ["stated", "inferred"]},
+                            "document": _S,
+                            "page": _S,
+                            "quote": _S,
+                            "note": _S,
+                        }
+                    ),
+                },
+            }
+        ),
         "key_facts": _obj(
             {
                 "buyer": _S, "tender_reference": _S, "submission_deadline": _S, "bid_opening": _S,
@@ -140,7 +161,13 @@ Indian government tenders (GeM bids and RFPs).
 
 Ground rules:
 - Work only from the tender documents and the company information provided. Cite where each \
-requirement comes from (document name and clause/section/page where visible).
+requirement comes from (document name and page - pages are marked "[Page N]" in the text - plus the \
+clause or section where visible).
+- Keep what the tender states separate from what you infer. Never merge two separate statements into one \
+claim (e.g. "11 on-site resources for 2 years" when the tender only says "11 resources", "on-site" and \
+"2-year contract" in different places) unless you flag it as an inference.
+- Some linked documents (often the detailed scope of work) may be missing from what you were given; when \
+a fact would normally be in them, say it needs confirmation from that document.
 - Never invent the company's certificates, clients, projects, turnover or staff. If the company \
 information doesn't show that a requirement is met, say so and mark it "to confirm" or "not complied" - \
 an honest gap is far more useful to the bid team than a confident guess.
@@ -223,6 +250,7 @@ class Workspace:
             self._collect_gem()
         else:
             self._collect_upload()
+        self._collect_added_files()
         total = sum(len(t) for _, t in self.sources)
         limit = self.cfg.ai.max_corpus_chars
         if total > limit:
@@ -260,7 +288,7 @@ class Workspace:
 
         if doc is not None and doc.pdf_path and Path(doc.pdf_path).exists():
             pdf = read_pdf(doc.pdf_path)
-            self.sources.append(("GeM bid document", clean_text(pdf.text)))
+            self.sources.append(("GeM bid document", pdf.paged_text()))
         elif doc is not None:
             self.sources.append(("GeM bid document (extracted fields)", json.dumps(doc.details or [], ensure_ascii=False)))
             if doc.atc_text:
@@ -272,12 +300,41 @@ class Workspace:
                 self.sources.append((f"Attachment: {att.label}", rendered))
             elif att.text:
                 self.sources.append((f"Attachment: {att.label}", att.text))
-        links = [a for a in bid.attachments if a.status in ("blocked_by_robots", "unsupported")]
-        if links:
+        reasons = {"blocked_by_robots": "GeM doesn't allow automated download", "unsupported": "scanned or unsupported file"}
+        unread = [
+            {"label": a.label, "kind": a.kind, "url": a.url, "reason": reasons[a.status]}
+            for a in bid.attachments
+            if a.status in reasons and a.kind not in ("gtc", "policy")
+        ]
+        self.result["unread_documents"] = unread
+        if unread:
             self.result["warnings"].append(
-                f"{len(links)} linked document(s) couldn't be read automatically (open them from the bid page): "
-                + ", ".join(a.label for a in links[:6])
+                f"{len(unread)} linked document(s) couldn't be read automatically: "
+                + ", ".join(u["label"] for u in unread[:6])
+                + ". Download them from GeM and add them under Overview > Tender documents, then re-generate."
             )
+
+    def _collect_added_files(self) -> None:
+        """Documents the user added to this workspace (e.g. a SOW downloaded from GeM by hand)."""
+        for item in self.a.extra_files or []:
+            path = Path(item["path"])
+            if not path.exists():
+                self.result["warnings"].append(f"Added document '{item['name']}' is missing on disk.")
+                continue
+            try:
+                extracted = extract(path.read_bytes(), "", item["name"])
+            except Exception as exc:
+                extracted = None
+                log.warning("Could not read added file %s: %s", path, exc)
+            if extracted is None or len(extracted.text.strip()) < 50:
+                self.result["warnings"].append(
+                    f"No text could be read from '{item['name']}' (scanned PDF?). Ask the buyer for a text PDF or "
+                    "paste the relevant clauses into a .txt file and add that instead."
+                )
+                continue
+            self.sources.append((f"Added by you: {item['name']}", extracted.text))
+            if extracted.rows:
+                self.tables.append((item["name"], extracted.rows))
 
     def _collect_upload(self) -> None:
         path = Path(self.a.file_path or "")
@@ -337,8 +394,11 @@ class Workspace:
             items.extend(find_boq(rows, source=label))
         source = "BoQ table in the tender documents" if items else ""
         if not items and self.a.source == "gem" and self.a.bid is not None:
-            items = boq_from_listing(self.a.bid.items, self.a.bid.quantity)
-            source = "GeM item list (no BoQ file could be read)"
+            doc = self.a.bid.document
+            items = boq_from_bid(
+                self.a.bid.items, self.a.bid.quantity, doc.spec_sections if doc else None, doc.consignees if doc else None
+            )
+            source = "From the bid document's specification and consignee tables (no BoQ file)"
         self.result["boq"] = {"items": items, "source": source}
         self._done("boq", note=f"{len(items)} item(s)" if items else "No BoQ table found")
 
@@ -394,7 +454,14 @@ class Workspace:
                 "registrations, past performance, OEM conditions), including any stated only in the ATC or SOW.\n"
                 "3. mandatory_documents: every document the bidder must upload or submit.\n"
                 "4. boq: the bill of quantities / line items, if the tender has one (empty list if not).\n"
-                "5. scope: the scope of work - summary, objectives, deliverables, timeline, location.\n"
+                "5. scope: the scope of work - summary, objectives, deliverables, timeline, location - plus `facts`: "
+                "each key scope fact (what is to be built, where it is deployed, who the consignee is, contract "
+                "period, maintenance period, manpower/resources, on-site or remote, milestones) as its own row with "
+                "the document name, the page from the [Page N] markers ('' if the document has none) and an exact "
+                "quote. Mark basis 'stated' only when the quote says it directly; mark 'inferred' when you combine "
+                "separate statements or interpret them (e.g. assuming resources are deployed for the whole contract "
+                "period), and say in `note` what is assumed and which document would confirm it. The summary must "
+                "not present inferred facts as certain.\n"
                 "6. key_facts: deadlines, EMD, performance security, value and evaluation method (empty string if absent).\n"
                 "7. risks: delivery, commercial, legal, timeline and eligibility risks of bidding for this tender "
                 "for our company specifically, with a practical mitigation for each."

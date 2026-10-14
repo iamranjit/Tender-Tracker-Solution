@@ -36,7 +36,7 @@ def _pdf(content: bytes, max_pages: int | None) -> Extracted:
 
         with pdfplumber.open(str(path)) as pdf:
             pages = len(pdf.pages)
-        return Extracted(clean_text(doc.text), [[clean_text(c or "") for c in r] for r in rows[:MAX_ROWS]], pages)
+        return Extracted(doc.paged_text(), [[clean_text(c or "") for c in r] for r in rows[:MAX_ROWS]], pages)
     finally:
         path.unlink(missing_ok=True)
 
