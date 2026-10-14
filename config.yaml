@@ -1,0 +1,211 @@
+# GeM Tender Tracker configuration.
+# Secrets (SMTP password, bot tokens) go in .env, never here.
+# Edit by hand or on the web app's Settings page; the scheduler reloads this file before every run.
+
+company:
+  name: "Your Company Pvt Ltd"
+  # One line per service. Used for semantic matching, so describe what you deliver in plain words.
+  services:
+    - "Custom software development: web applications, web portals and websites for government departments"
+    - "Mobile app development for Android and iOS"
+    - "ERP, CRM, workflow automation and e-governance software, including annual maintenance and support of software"
+    - "Artificial intelligence and machine learning solutions: chatbots, document processing, computer vision, NLP"
+    - "Data analytics, dashboards, business intelligence and MIS reporting"
+    - "IT manpower outsourcing: software developers, programmers, data analysts and IT support staff"
+  is_startup: true          # DPIIT-recognised
+  is_mse: true              # Udyam-registered
+  turnover_lakh: 0          # average annual turnover in ₹ lakh - UPDATE with your real figure
+  experience_years: 0       # UPDATE
+  past_govt_projects: 0     # completed government orders; 0 => bids demanding past performance are flagged
+  # Registration details - easiest to fill on the web app's Settings page (formats are checked)
+  entity_type: ""           # Private Limited Company | Public Limited Company | One Person Company | Limited Liability Partnership | Partnership Firm | Sole Proprietorship | Other
+  registration_number: ""   # CIN for companies, LLPIN for LLPs
+  incorporation_date: ""    # YYYY-MM-DD
+  registered_address: ""
+  state: ""
+  pan: ""
+  gstin: ""
+  udyam_number: ""          # UDYAM-XX-00-0000000
+  msme_category: ""         # micro | small | medium (MSE relaxations apply to micro & small only)
+  dpiit_number: ""          # e.g. DIPP12345
+  dpiit_valid_until: ""     # YYYY-MM-DD; startup relaxation is not applied to bids closing after this
+
+search:
+  # Sent to GeM's own search ("Contains" mode). GeM matches ANY word of a multi-word term
+  # ("mobile app" also returns mobile storage compactors), so prefer distinctive words and let
+  # include/exclude keywords below do the precise filtering. Each term costs up to
+  # max_pages_per_term requests at ~3.5 s each (15 terms x 25 pages ~ 20 min/day).
+  terms:
+    - software
+    - portal
+    - website
+    - mobile application
+    - android
+    - ERP
+    - analytics
+    - dashboard
+    - chatbot
+    - artificial intelligence
+    - machine learning
+    - developer
+    - programmer
+    - digitization
+    - e-governance
+  max_pages_per_term: 25      # 25 pages = 250 newest bids per term
+  include_ra: false           # reverse auctions
+  min_delay_seconds: 2
+  max_delay_seconds: 5
+  contact_email: ""           # put your email here; it goes in the User-Agent so GeM can reach you
+  max_pdfs_per_run: 150
+  fetch_attachments: true     # read SOW/BoQ/spec attachments of shortlisted bids (only hosts whose robots.txt allows it)
+  max_attachments_per_run: 60
+  check_corrigendum: true
+  playwright_fallback: false  # true + `pip install playwright && playwright install chromium` if GeM adds a JS challenge
+
+filters:
+  # keyword: weight (1 = weak signal, 3 = strong). Title matches count title_weight x more.
+  include_keywords:
+    software development: 3
+    application development: 3
+    software: 3                 # weak alone: GeM uses it for licence purchases too
+    management software: 2
+    management system: 3
+    information system: 3
+    software solution: 3
+    portal: 3
+    web portal: 3
+    portal development: 3
+    website development: 3
+    website: 3
+    web application: 3
+    mobile app: 3
+    mobile application: 3
+    android: 3
+    ERP: 3
+    CRM: 3
+    e-governance: 3
+    maintenance of software: 3
+    software maintenance: 3
+    AMC of software: 3
+    customised software: 3
+    customized software: 3
+    IT services: 2
+    cloud: 1
+    artificial intelligence: 3
+    AI: 2
+    machine learning: 3
+    chatbot: 3
+    computer vision: 3
+    natural language processing: 3
+    data analytics: 3
+    analytics: 3
+    dashboard: 2
+    business intelligence: 3
+    MIS: 1
+    digitization: 3
+    software developer: 3
+    programmer: 3
+    IT professional: 3
+    data analyst: 3
+    data scientist: 3
+    information technology: 3
+    full stack: 3
+    design and development: 3
+    development of software: 3
+    IT-Technical: 3             # GeM manpower category "Fixed Remuneration - IT-Technical"
+  exclude_keywords:
+    - hardware supply
+    - printer
+    - toner
+    - cartridge
+    - furniture
+    - vehicle
+    - desktop computer
+    - laptop
+    - all in one pc
+    - CCTV
+    - UPS
+    - air conditioner
+    - stationery
+    - housekeeping
+    - security guard
+    - security manpower
+    - sanitation
+    - cleaning
+    - driver
+    - unskilled
+    - semi-skilled
+    - catering
+    - repair of
+    - civil work
+    - electrical work
+    - medical equipment
+    - hiring of vehicle
+    # off-the-shelf software purchases (reselling, needs OEM authorisation)
+    - license
+    - licence
+    - subscription
+    - antivirus
+    - operating system
+    - MS Office
+    - perpetual
+    # hardware-heavy bunch bids that mention software
+    - supply of
+    - equipment
+    - battery
+    - motor
+    - cable
+    - spare
+    - mobile phone
+    - smart screen
+    - monitor
+    - router
+    - firewall
+    - CAT 6
+    - RJ45
+  preferred_ministries: []    # e.g. ["Ministry of Electronics and Information Technology"]
+  preferred_states: []        # empty = pan-India; matched against the consignee address in the PDF
+  min_value: null             # ₹; only applied when GeM publishes an estimated value
+  max_value: null
+  min_days_until_closing: 5   # skip new bids closing sooner than this
+  closing_penalty_days: 2
+  closing_penalty_points: 15
+  score_threshold: 50
+  title_weight: 2.0
+  description_weight: 1.0
+  keyword_saturation: 6.0
+  exclude_in_description_penalty: 10
+  preferred_bonus: 5
+  pdf_min_relevance: 0.25
+  oem_authorization_policy: review   # review | ignore | reject
+  hide_not_eligible: true     # stays visible in the dashboard, but never shortlisted
+
+scoring:      # relative weights; renormalised if semantic scoring is off
+  keyword: 45
+  semantic: 25
+  eligibility: 30
+
+semantic:
+  enabled: true     # needs `pip install -r requirements-ml.txt`; skipped with a warning otherwise
+  model: sentence-transformers/all-MiniLM-L6-v2
+  floor: 0.20
+  ceiling: 0.60
+
+notifications:
+  channels: [email, telegram]   # any of: email, telegram, slack, whatsapp
+  email_to: []                  # e.g. ["founder@yourco.in"]; or EMAIL_TO in .env
+  closing_soon_days: 3
+  max_items_per_section: 30
+  send_empty_digest: true
+  attach_excel: true
+  dashboard_url: ""             # e.g. https://tenders.yourco.in
+
+schedule:
+  hour: 8
+  minute: 0
+  timezone: Asia/Kolkata
+
+storage:
+  database_url: sqlite:///data/tender_tracker.db   # overridden by DATABASE_URL in .env
+  data_dir: data
+  keep_pdfs_days: 45

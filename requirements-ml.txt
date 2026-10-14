@@ -1,0 +1,4 @@
+# Optional: semantic similarity scoring (adds ~1 GB with CPU-only torch).
+# Install CPU torch first to avoid pulling CUDA wheels:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+sentence-transformers>=3.0

@@ -1,0 +1,38 @@
+x-common: &common
+  build:
+    context: .
+    args:
+      INSTALL_ML: ${INSTALL_ML:-false}
+  image: gem-tender-tracker
+  env_file: .env
+  volumes:
+    - ./data:/app/data
+    - ./config.yaml:/app/config.yaml
+  restart: unless-stopped
+
+services:
+  # Web app: REST API + React UI on http://localhost:8000
+  # Bound to localhost only - reach it through an SSH tunnel or a reverse proxy (see README),
+  # and set APP_USERNAME / APP_PASSWORD in .env before exposing it.
+  web:
+    <<: *common
+    command: ["python", "-m", "tender_tracker", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 60s
+      timeout: 5s
+
+  # Daily run at 08:00 IST (APScheduler inside the container).
+  scheduler:
+    <<: *common
+    command: ["python", "-m", "tender_tracker", "schedule"]
+
+  # One-off commands: docker compose run --rm app run   (or: app digest, app reparse, app test-notify)
+  app:
+    <<: *common
+    restart: "no"
+    profiles: ["manual"]
+    entrypoint: ["python", "-m", "tender_tracker"]
+    command: ["run"]
