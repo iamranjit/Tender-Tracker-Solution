@@ -209,3 +209,13 @@ storage:
   database_url: sqlite:///data/tender_tracker.db   # overridden by DATABASE_URL in .env
   data_dir: data
   keep_pdfs_days: 45
+
+ai:
+  # AI drafting in proposal workspaces (requirements, compliance matrix, approach, PPT).
+  # Needs ANTHROPIC_API_KEY in .env. Tender text, your company profile and library
+  # documents are sent to Anthropic's API when a workspace is generated.
+  enabled: true
+  model: claude-opus-5-5
+  effort: high                  # low | medium | high | xhigh | max
+  max_corpus_chars: 1500000     # tender text per workspace (~400k tokens)
+  proposals_for_reference: 2    # similar previous proposals included as reference

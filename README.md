@@ -70,6 +70,46 @@ Things to know about this data:
 - `robots.txt` (checked October 2026) only disallows `/resources/` and a few `/bg_emd/epbgservice/…` paths. None of the endpoints used here are disallowed.
 - **Before relying on this tool, read GeM's Terms of Use yourself** (linked in the footer of gem.gov.in). The bid listing and bid documents are published publicly so sellers can find bids. This tool only reads public pages, never logs in, and never submits anything. Don't redistribute the downloaded documents, and don't raise the request rate. If GeM objects or publishes an official API or feed, switch to that.
 
+## Proposal workspaces (bid preparation)
+
+From any tender's page, click **Prepare proposal**. You can also upload any tender or RFP document (PDF, DOCX, XLSX or TXT, including 200+ page RFPs that aren't on GeM) under **Proposals**. A workspace is then generated in these stages:
+
+| Stage | What you get | Needs AI? |
+|---|---|---|
+| Collect | All tender text: the bid PDF, readable attachments (SOW, BoQ, specifications, SLA) or the uploaded file | No |
+| Eligibility | A checklist comparing the tender's criteria with your profile (GeM bids) | No |
+| | Every eligibility criterion in the tender, including those in the ATC/SOW | Yes |
+| BoQ | A structured bill of quantities (item, description, quantity, unit, delivery) read from BoQ CSV/XLSX/DOCX tables. For PDF-only tenders the AI extracts it | No / Yes |
+| Requirements | Every requirement (eligibility, technical, functional, commercial, legal, documents, timelines), with its source | Yes |
+| Compliance matrix | For each requirement: complied / partially / not complied / to confirm, the response text, the evidence from your library, and remarks | Yes |
+| Mandatory documents | Each required document matched to your library: *in library*, *expired*, *missing*, *prepare for this bid* (undertakings) or *check ATC* | No |
+| Scope & solution | Scope of work, solution architecture, technical approach | Yes |
+| Methodology & team | Phases with activities, deliverables and duration; team roles | Yes |
+| Risks | Risk analysis with likelihood, impact and mitigation | Yes |
+| Submission checklist | Deadline, GeM registration, eligibility, every document, EMD/exemption, pricing, signing | No |
+| Proposal & slides | Executive summary, understanding, why us, assumptions; a 10–14 slide deck | Yes |
+
+There are three downloads:
+- **Proposal (Word)**: the full technical proposal, with the compliance matrix, BoQ, documents and checklist as annexures.
+- **Slides (PowerPoint)**: the presentation draft, with speaker notes.
+- **Compliance & BoQ (Excel)**: compliance matrix, requirements, BoQ, documents, checklist and risks.
+
+**Document library.** Upload your capability documents once:
+- certificates (incorporation, PAN, GST, Udyam, DPIIT);
+- turnover certificate and audited financials;
+- work orders and completion certificates;
+- ISO/CMMI certificates and empanelment letters;
+- CVs and your company profile.
+
+Give each document an expiry date if it has one; expired documents are flagged. Upload **previous proposals** as well, with client, year and outcome. The most similar ones are given to the AI as reference material.
+
+**AI drafting** uses Claude (`claude-opus-5-5`; configurable under `ai:` in `config.yaml`):
+- **How it works:** it runs three calls per workspace, each returning schema-checked JSON. The tender text is sent once as a cached prefix, so the second and third calls are much cheaper. If a request is declined by a safety check, Anthropic's server-side fallback re-runs it on another model.
+- **Setup:** add `ANTHROPIC_API_KEY=...` to `.env` and restart.
+- **Without a key:** every non-AI stage still runs, and the workspace shows what the AI steps would add.
+- **Privacy:** when a workspace is generated, the tender text, your company profile and library documents (including relevant previous proposals) are sent to Anthropic's API.
+- **The AI never fills gaps:** it is told never to invent certificates, clients or experience, and marks anything unproven as "to confirm". Review every draft before submitting.
+
 ## Project layout
 
 ```
@@ -83,6 +123,13 @@ tender_tracker/
   storage.py        SQLAlchemy models: bids, bid_documents, bid_attachments, scores, notifications_sent,
                     run_logs (+ automatic add-column migration)
   api.py            FastAPI REST API; also serves the built frontend
+  proposal.py       proposal workspace pipeline (collect -> eligibility -> BoQ -> AI analysis -> documents ->
+                    compliance -> proposal -> checklist)
+  ai.py             Claude client: streaming, structured outputs, prompt caching, server-side fallback
+  library.py        company document library, document matching, similar previous proposals
+  boq.py            structured bill of quantities from tables
+  extract.py        PDF / DOCX / XLSX / CSV / HTML / TXT -> text and table rows
+  exports.py        Word proposal, PowerPoint deck, Excel compliance workbook
   pipeline.py       one daily run, start to finish; change detection; failure alerts
   report.py         digest sections, email/Telegram/Slack rendering, Excel export
   notifier.py       email (SMTP), Telegram, Slack webhook, WhatsApp (Twilio)

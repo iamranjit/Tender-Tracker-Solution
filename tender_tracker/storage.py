@@ -164,9 +164,58 @@ class BidAttachment(Base):
     fetched_at: Mapped[datetime | None] = mapped_column(DateTime)
     content_type: Mapped[str | None] = mapped_column(String(128))
     text: Mapped[str | None] = mapped_column(Text)
+    table: Mapped[list[Any] | None] = mapped_column(JSON)  # rows for CSV/XLSX files (BoQ)
     error: Mapped[str | None] = mapped_column(Text)
 
     bid: Mapped[Bid] = relationship(back_populates="attachments")
+
+
+class CompanyDocument(Base):
+    """Company capability documents and previous proposals (the document library)."""
+
+    __tablename__ = "company_documents"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)  # capability | proposal
+    category: Mapped[str] = mapped_column(String(48))
+    title: Mapped[str] = mapped_column(String(255))
+    filename: Mapped[str] = mapped_column(String(255))
+    path: Mapped[str] = mapped_column(String(512))
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    valid_until: Mapped[str | None] = mapped_column(String(10))  # YYYY-MM-DD
+    notes: Mapped[str | None] = mapped_column(Text)
+    # previous-proposal metadata
+    client: Mapped[str | None] = mapped_column(String(255))
+    year: Mapped[int | None] = mapped_column(Integer)
+    value_lakh: Mapped[float | None] = mapped_column(Float)
+    outcome: Mapped[str | None] = mapped_column(String(16))  # won | lost | submitted
+    text: Mapped[str | None] = mapped_column(Text)
+    text_status: Mapped[str] = mapped_column(String(16), default="ok")  # ok | empty | unsupported
+
+
+class TenderAnalysis(Base):
+    """A proposal workspace: everything generated for one tender (GeM bid or uploaded document)."""
+
+    __tablename__ = "tender_analyses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bid_id: Mapped[int | None] = mapped_column(ForeignKey("bids.id", ondelete="SET NULL"), index=True)
+    source: Mapped[str] = mapped_column(String(16))  # gem | upload
+    title: Mapped[str] = mapped_column(Text)
+    file_path: Mapped[str | None] = mapped_column(String(512))
+    status: Mapped[str] = mapped_column(String(16), default="queued")  # queued | running | done | failed
+    stage: Mapped[str | None] = mapped_column(String(64))
+    progress: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    error: Mapped[str | None] = mapped_column(Text)
+    ai_used: Mapped[bool] = mapped_column(Boolean, default=False)
+    model: Mapped[str | None] = mapped_column(String(64))
+    corpus_chars: Mapped[int] = mapped_column(Integer, default=0)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now_ist)
+
+    bid: Mapped[Bid | None] = relationship()
 
 
 class Score(Base):

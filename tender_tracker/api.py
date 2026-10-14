@@ -11,13 +11,15 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import re
 import secrets
 import threading
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -36,6 +38,7 @@ from .config import (
     save_config_text,
     update_config_values,
 )
+from .ai import ai_status
 from .notifier import build_channels, channel_status
 from .fetcher import GemClient
 from .filter_scorer import (
@@ -52,6 +55,8 @@ from .storage import (
     Bid,
     BidAttachment,
     BidDocument,
+    CompanyDocument,
+    TenderAnalysis,
     RunLog,
     Score,
     init_db,
@@ -224,6 +229,7 @@ def meta() -> dict[str, Any]:
         "eligibility_statuses": [ELIGIBLE, ELIGIBLE_EXEMPT, REVIEW, NOT_ELIGIBLE, NOT_CHECKED],
         "feedback_choices": FEEDBACK_CHOICES,
         "closing_soon_days": cfg.notifications.closing_soon_days,
+        "ai": ai_status(cfg.ai),
     }
 
 
@@ -404,6 +410,13 @@ def bid_detail(bid_id: int, session: Session = Depends(get_session)) -> dict[str
                 "scored_at": score.scored_at,
                 "history": [{"at": at, "total": total} for at, total in reversed(history)],
             },
+            "boq": _bid_boq(bid),
+            "workspaces": [
+                {"id": w.id, "status": w.status, "created_at": w.created_at}
+                for w in session.scalars(
+                    select(TenderAnalysis).where(TenderAnalysis.bid_id == bid.id).order_by(TenderAnalysis.id.desc())
+                )
+            ],
             "feedback_note": bid.feedback_note,
             "feedback_at": bid.feedback_at,
             "shortlisted_at": bid.shortlisted_at,
@@ -668,6 +681,254 @@ class TermsIn(BaseModel):
 def apply_suggestions(body: TermsIn) -> dict[str, Any]:
     added = add_exclude_keywords(CONFIG_PATH, [t.strip() for t in body.terms if t.strip()])
     return {"added": added, "rescore": _after_config_change()}
+
+
+# -- proposal workspaces --------------------------------------------------------------------
+
+
+def _bid_boq(bid: Bid) -> list[dict[str, Any]]:
+    from .boq import find_boq
+
+    items: list[dict[str, Any]] = []
+    for att in bid.attachments:
+        if att.table:
+            items.extend(find_boq(att.table, source=att.label))
+    return items
+
+
+_analysis_threads: dict[int, threading.Thread] = {}
+
+
+def _start_analysis(analysis_id: int) -> None:
+    from .proposal import run_analysis
+
+    if (t := _analysis_threads.get(analysis_id)) and t.is_alive():
+        raise HTTPException(409, "This workspace is already being generated")
+    cfg = load_config(CONFIG_PATH)
+
+    def target() -> None:
+        try:
+            run_analysis(analysis_id, cfg, _sessions(), gem_client=GemClient(cfg.search))
+        except Exception:
+            log.exception("Workspace %s failed", analysis_id)
+
+    thread = threading.Thread(target=target, name=f"workspace-{analysis_id}", daemon=True)
+    _analysis_threads[analysis_id] = thread
+    thread.start()
+
+
+def _analysis_summary(a: TenderAnalysis) -> dict[str, Any]:
+    r = a.result or {}
+    return {
+        "id": a.id,
+        "bid_id": a.bid_id,
+        "bid_number": a.bid.bid_number if a.bid else None,
+        "source": a.source,
+        "title": a.title,
+        "status": a.status,
+        "progress": a.progress,
+        "error": a.error,
+        "ai_used": a.ai_used,
+        "created_at": a.created_at,
+        "updated_at": a.updated_at,
+        "deadline": (r.get("summary") or {}).get("bid_end") or (r.get("key_facts") or {}).get("submission_deadline"),
+        "missing_documents": (r.get("documents") or {}).get("missing"),
+        "requirements": len(r.get("requirements") or []),
+    }
+
+
+@app.get("/api/ai/status")
+def get_ai_status() -> dict[str, Any]:
+    return ai_status(get_config().ai)
+
+
+@app.get("/api/analyses")
+def list_analyses(session: Session = Depends(get_session)) -> dict[str, Any]:
+    rows = session.scalars(
+        select(TenderAnalysis).options(selectinload(TenderAnalysis.bid)).order_by(TenderAnalysis.id.desc()).limit(200)
+    )
+    return {"items": [_analysis_summary(a) for a in rows], "ai": ai_status(get_config().ai)}
+
+
+class AnalysisIn(BaseModel):
+    bid_id: int
+
+
+@app.post("/api/analyses", status_code=202)
+def create_analysis(body: AnalysisIn, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Create a proposal workspace for a stored GeM bid and start generating it."""
+    bid = _get_bid(session, body.bid_id)
+    a = TenderAnalysis(bid_id=bid.id, source="gem", title=bid.title, status="queued")
+    session.add(a)
+    session.commit()
+    _start_analysis(a.id)
+    return _analysis_summary(a)
+
+
+@app.post("/api/analyses/upload", status_code=202)
+async def upload_tender(
+    file: UploadFile = File(...), title: str = Form(""), session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Create a workspace from any tender document (PDF, DOCX, XLSX, TXT)."""
+    from .library import MAX_UPLOAD_BYTES, _safe_name
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(400, "The file is empty")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"File is larger than {MAX_UPLOAD_BYTES // 1_000_000} MB")
+    folder = get_config().data_dir / "tenders"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{uuid.uuid4().hex[:12]}_{_safe_name(file.filename or 'tender')}"
+    path.write_bytes(content)
+    title = title.strip() or Path(file.filename or "Tender").stem
+    a = TenderAnalysis(source="upload", title=title, file_path=str(path), status="queued")
+    session.add(a)
+    session.commit()
+    _start_analysis(a.id)
+    return _analysis_summary(a)
+
+
+def _get_analysis(session: Session, analysis_id: int) -> TenderAnalysis:
+    a = session.scalar(
+        select(TenderAnalysis).where(TenderAnalysis.id == analysis_id).options(selectinload(TenderAnalysis.bid))
+    )
+    if a is None:
+        raise HTTPException(404, "Workspace not found")
+    return a
+
+
+@app.get("/api/analyses/{analysis_id}")
+def get_analysis(analysis_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    a = _get_analysis(session, analysis_id)
+    result = dict(a.result or {})
+    result.pop("trace", None)
+    return {**_analysis_summary(a), "result": result, "model": a.model, "corpus_chars": a.corpus_chars}
+
+
+@app.post("/api/analyses/{analysis_id}/rerun", status_code=202)
+def rerun_analysis(analysis_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    a = _get_analysis(session, analysis_id)
+    a.status, a.error = "queued", None
+    session.commit()
+    _start_analysis(a.id)
+    return _analysis_summary(a)
+
+
+@app.delete("/api/analyses/{analysis_id}")
+def delete_analysis(analysis_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    a = _get_analysis(session, analysis_id)
+    if (t := _analysis_threads.get(analysis_id)) and t.is_alive():
+        raise HTTPException(409, "Wait for generation to finish before deleting")
+    if a.file_path:
+        Path(a.file_path).unlink(missing_ok=True)
+    session.delete(a)
+    session.commit()
+    return {"deleted": analysis_id}
+
+
+EXPORT_TYPES = {
+    "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "proposal"),
+    "pptx": ("application/vnd.openxmlformats-officedocument.presentationml.presentation", "presentation"),
+    "xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "compliance"),
+}
+
+
+@app.get("/api/analyses/{analysis_id}/export/{fmt}")
+def export_analysis(analysis_id: int, fmt: str, session: Session = Depends(get_session)) -> Response:
+    from . import exports
+
+    if fmt not in EXPORT_TYPES:
+        raise HTTPException(404, "Unknown export format")
+    a = _get_analysis(session, analysis_id)
+    if not a.result:
+        raise HTTPException(409, "This workspace hasn't been generated yet")
+    company = get_config().company
+    if fmt == "docx":
+        data = exports.to_docx(a.result, a.title, company)
+    elif fmt == "pptx":
+        data = exports.to_pptx(a.result, a.title, company)
+    else:
+        data = exports.to_xlsx(a.result)
+    media, stem = EXPORT_TYPES[fmt]
+    ref = re.sub(r"[^A-Za-z0-9]+", "_", a.bid.bid_number if a.bid else a.title)[:60].strip("_")
+    return Response(data, media_type=media, headers={"Content-Disposition": f'attachment; filename="{stem}_{ref}.{fmt}"'})
+
+
+# -- document library -----------------------------------------------------------------------
+
+
+def _library_item(d: CompanyDocument) -> dict[str, Any]:
+    from .library import CAPABILITY_CATEGORIES, is_expired
+
+    label = CAPABILITY_CATEGORIES.get(d.category, ("Other",))[0] if d.kind == "capability" else "Previous proposal"
+    return {
+        "id": d.id, "kind": d.kind, "category": d.category, "category_label": label, "title": d.title,
+        "filename": d.filename, "size_bytes": d.size_bytes, "uploaded_at": d.uploaded_at,
+        "valid_until": d.valid_until, "expired": is_expired(d), "notes": d.notes, "client": d.client,
+        "year": d.year, "value_lakh": d.value_lakh, "outcome": d.outcome, "text_status": d.text_status,
+        "text_chars": len(d.text or ""),
+    }  # fmt: skip
+
+
+@app.get("/api/library")
+def list_library(kind: str | None = None, session: Session = Depends(get_session)) -> dict[str, Any]:
+    from .library import CAPABILITY_CATEGORIES
+
+    q = select(CompanyDocument).order_by(CompanyDocument.kind, CompanyDocument.category, CompanyDocument.title)
+    if kind:
+        q = q.where(CompanyDocument.kind == kind)
+    return {
+        "items": [_library_item(d) for d in session.scalars(q)],
+        "categories": [{"key": k, "label": v[0]} for k, v in CAPABILITY_CATEGORIES.items()],
+    }
+
+
+@app.post("/api/library", status_code=201)
+async def upload_library_document(
+    file: UploadFile = File(...),
+    kind: str = Form(...),
+    category: str = Form("other"),
+    title: str = Form(""),
+    valid_until: str = Form(""),
+    notes: str = Form(""),
+    client: str = Form(""),
+    year: str = Form(""),
+    value_lakh: str = Form(""),
+    outcome: str = Form(""),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    from .library import add_document
+
+    try:
+        doc = add_document(
+            session, get_config(), kind=kind, category=category, title=title, filename=file.filename or "document",
+            content=await file.read(), content_type=file.content_type or "", valid_until=valid_until or None,
+            notes=notes or None, client=client or None, year=int(year) if year.strip() else None,
+            value_lakh=float(value_lakh) if value_lakh.strip() else None, outcome=outcome or None,
+        )  # fmt: skip
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return _library_item(doc)
+
+
+@app.get("/api/library/{doc_id}/download")
+def download_library_document(doc_id: int, session: Session = Depends(get_session)) -> FileResponse:
+    d = session.get(CompanyDocument, doc_id)
+    if d is None or not Path(d.path).exists():
+        raise HTTPException(404, "Document not found")
+    return FileResponse(d.path, filename=d.filename)
+
+
+@app.delete("/api/library/{doc_id}")
+def delete_library_document(doc_id: int, session: Session = Depends(get_session)) -> dict[str, Any]:
+    from .library import delete_document
+
+    d = session.get(CompanyDocument, doc_id)
+    if d is None:
+        raise HTTPException(404, "Document not found")
+    delete_document(session, d)
+    return {"deleted": doc_id}
 
 
 # -- frontend -----------------------------------------------------------------------------

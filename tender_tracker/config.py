@@ -142,6 +142,17 @@ class SemanticConfig:
 
 
 @dataclass
+class AIConfig:
+    """AI drafting for proposal workspaces (Claude). Needs ANTHROPIC_API_KEY in .env."""
+
+    enabled: bool = True
+    model: str = "claude-opus-5-5"
+    effort: str = "high"  # low | medium | high | xhigh | max
+    max_corpus_chars: int = 1_500_000  # tender text sent per workspace (~400k tokens)
+    proposals_for_reference: int = 2  # most similar previous proposals included as reference
+
+
+@dataclass
 class NotificationConfig:
     channels: list[str] = field(default_factory=lambda: ["email"])  # email, telegram, slack, whatsapp
     email_to: list[str] = field(default_factory=list)
@@ -179,6 +190,7 @@ class Config:
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
     schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
     storage: StorageConfig = field(default_factory=StorageConfig)
+    ai: AIConfig = field(default_factory=AIConfig)
     path: Path | None = None
 
     @property
@@ -250,6 +262,7 @@ def config_from_dict(data: dict[str, Any] | None) -> Config:
         "notifications": NotificationConfig,
         "schedule": ScheduleConfig,
         "storage": StorageConfig,
+        "ai": AIConfig,
     }
     unknown = set(data) - set(sections)
     if unknown:
@@ -261,6 +274,8 @@ def config_from_dict(data: dict[str, Any] | None) -> Config:
     filters.exclude_keywords = [str(k).strip() for k in (filters.exclude_keywords or []) if str(k).strip()]
     if filters.oem_authorization_policy not in {"review", "ignore", "reject"}:
         raise ValueError("filters.oem_authorization_policy must be review, ignore or reject")
+    if built["ai"].effort not in {"low", "medium", "high", "xhigh", "max"}:
+        raise ValueError("ai.effort must be low, medium, high, xhigh or max")
     if not built["search"].terms:
         raise ValueError("search.terms must contain at least one search term")
     return Config(**built)

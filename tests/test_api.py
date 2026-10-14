@@ -23,6 +23,7 @@ def client(tmp_path, monkeypatch):
 company: {{name: Test Co, is_startup: true, is_mse: true, turnover_lakh: 40, experience_years: 2}}
 search: {{terms: [software]}}
 filters: {{include_keywords: {{software: 3}}}}
+ai: {{enabled: false}}
 storage: {{database_url: "sqlite:///{(tmp_path / 't.db').as_posix()}", data_dir: "{tmp_path.as_posix()}"}}
 """,
         encoding="utf-8",
@@ -182,3 +183,33 @@ def test_profile_change_rescores_stored_tenders(client):
 
     after = client.get("/api/bids", params={"view": "all"}).json()["items"][0]
     assert after["eligibility_status"] == "Not eligible"
+
+
+def test_library_upload_and_tender_workspace(client):
+    import tender_tracker.api as api
+
+    r = client.post("/api/library", data={"kind": "capability", "category": "gst", "title": "GST certificate", "valid_until": "2031-01-01"},
+                    files={"file": ("gst.txt", b"GSTIN 27AAPFU0939F1ZV registration", "text/plain")})  # fmt: skip
+    assert r.status_code == 201 and r.json()["category_label"] == "GST registration certificate"
+    doc_id = r.json()["id"]
+    assert client.get(f"/api/library/{doc_id}/download").content.startswith(b"GSTIN")
+    bad = client.post("/api/library", data={"kind": "capability", "category": "nonsense"}, files={"file": ("x.txt", b"x", "text/plain")})
+    assert bad.status_code == 400
+
+    tender = (
+        "REQUEST FOR PROPOSAL - Development of Citizen Grievance Portal\n" + "Scope of work: build and maintain a web portal. " * 30
+        + "\nThe bidder must submit GST registration certificate and PAN card.\n"
+    )
+    r = client.post("/api/analyses/upload", data={"title": "Grievance portal RFP"}, files={"file": ("rfp.txt", tender.encode(), "text/plain")})
+    assert r.status_code == 202
+    aid = r.json()["id"]
+    api._analysis_threads[aid].join(timeout=30)
+    detail = client.get(f"/api/analyses/{aid}").json()
+    assert detail["status"] == "done", detail.get("error")
+    assert detail["result"]["stages"]["analyse"]["status"] == "skipped"  # no API key in tests
+    assert detail["result"]["sources"][0]["name"] == "rfp.txt"
+    for fmt in ("docx", "pptx", "xlsx"):
+        resp = client.get(f"/api/analyses/{aid}/export/{fmt}")
+        assert resp.status_code == 200 and resp.content[:2] == b"PK"
+    assert client.delete(f"/api/library/{doc_id}").json() == {"deleted": doc_id}
+    assert client.delete(f"/api/analyses/{aid}").json() == {"deleted": aid}

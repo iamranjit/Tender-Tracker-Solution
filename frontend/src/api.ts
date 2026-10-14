@@ -106,10 +106,127 @@ export interface BidDetail extends BidSummary {
     scored_at: string;
     history: { at: string; total: number }[];
   };
+  boq: BoqItem[];
+  workspaces: { id: number; status: string; created_at: string }[];
   feedback_note: string | null;
   feedback_at: string | null;
   shortlisted_at: string | null;
   last_seen_at: string;
+}
+
+export interface BoqItem {
+  item_no: string;
+  title: string;
+  description: string;
+  quantity: number | null;
+  quantity_text: string;
+  unit: string;
+  delivery: string;
+  source: string;
+}
+
+export interface AiStatus {
+  ready: boolean;
+  model: string;
+  reason: string;
+}
+
+export interface AnalysisSummary {
+  id: number;
+  bid_id: number | null;
+  bid_number: string | null;
+  source: "gem" | "upload";
+  title: string;
+  status: "queued" | "running" | "done" | "failed";
+  progress: { stage: string; stage_index: number; stages: string[]; message: string; percent: number } | null;
+  error: string | null;
+  ai_used: boolean;
+  created_at: string;
+  updated_at: string;
+  deadline: string | null;
+  missing_documents: number | null;
+  requirements: number;
+}
+
+export interface Requirement {
+  id: string;
+  category: string;
+  requirement: string;
+  mandatory: boolean;
+  source: string;
+}
+
+export interface ComplianceRow extends Requirement {
+  status: "complied" | "partially_complied" | "not_complied" | "to_confirm";
+  response: string;
+  evidence: string[];
+  remarks: string;
+}
+
+export interface RequiredDocument {
+  requirement: string;
+  category: string;
+  category_label: string;
+  status: "available" | "expired" | "prepare" | "review" | "missing";
+  documents: { id: number; title: string; valid_until: string | null }[];
+  purpose: string;
+  source: string;
+}
+
+export interface AnalysisResult {
+  warnings: string[];
+  stages: Record<string, { status: "done" | "skipped" | "failed"; note: string }>;
+  sources?: { name: string; chars: number }[];
+  pages?: number;
+  summary?: Record<string, string | number | null>;
+  eligibility?: { status: string | null; reasons: string[]; checklist: ChecklistRow[]; ai_criteria?: { criterion: string; requirement: string; source: string }[] };
+  boq?: { items: BoqItem[]; source: string };
+  requirements?: Requirement[];
+  compliance?: ComplianceRow[];
+  documents?: { required: RequiredDocument[]; missing: number; library_count: number };
+  scope?: { summary: string; objectives: string[]; deliverables: string[]; timeline: string; location: string };
+  key_facts?: Record<string, string>;
+  risks?: { risk: string; category: string; likelihood: string; impact: string; mitigation: string }[];
+  proposal?: {
+    executive_summary: string;
+    understanding: string;
+    solution_architecture: { overview: string; components: { name: string; description: string; technology: string }[] };
+    technical_approach: string;
+    methodology: { phase: string; duration: string; activities: string[]; deliverables: string[] }[];
+    team: { role: string; count: number; responsibilities: string }[];
+    why_us: string[];
+    assumptions: string[];
+    slides: { title: string; bullets: string[]; notes: string }[];
+  };
+  checklist?: { item: string; category: string; status: "done" | "todo" | "missing"; detail: string }[];
+  reference_proposals?: { id: number; title: string; client: string | null; outcome: string | null }[];
+  usage?: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number; calls: number };
+}
+
+export interface AnalysisDetail extends AnalysisSummary {
+  result: AnalysisResult;
+  model: string | null;
+  corpus_chars: number;
+}
+
+export interface LibraryItem {
+  id: number;
+  kind: "capability" | "proposal";
+  category: string;
+  category_label: string;
+  title: string;
+  filename: string;
+  size_bytes: number;
+  uploaded_at: string;
+  valid_until: string | null;
+  expired: boolean;
+  notes: string | null;
+  client: string | null;
+  year: number | null;
+  value_lakh: number | null;
+  outcome: "won" | "lost" | "submitted" | null;
+  text_status: "ok" | "empty" | "unsupported";
+  text_chars: number;
 }
 
 export interface RunInfo {
@@ -172,6 +289,7 @@ export interface Meta {
   eligibility_statuses: string[];
   feedback_choices: Record<string, string>;
   closing_soon_days: number;
+  ai: AiStatus;
 }
 
 export interface SettingsValues {
@@ -273,9 +391,10 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const isForm = init?.body instanceof FormData; // let the browser set the multipart boundary
   const res = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: isForm ? init?.headers : { "Content-Type": "application/json", ...(init?.headers ?? {}) },
   });
   if (!res.ok) {
     let message = res.statusText;
@@ -313,6 +432,16 @@ export const api = {
     request<{ attempted: number; attachments: Attachment[] }>(`/api/bids/${id}/attachments/fetch`, { method: "POST" }),
   attachment: (id: number) => request<Attachment>(`/api/attachments/${id}`),
   runs: () => request<{ items: RunInfo[]; running: boolean }>("/api/runs"),
+  analyses: () => request<{ items: AnalysisSummary[]; ai: AiStatus }>("/api/analyses"),
+  analysis: (id: number) => request<AnalysisDetail>(`/api/analyses/${id}`),
+  createAnalysis: (bidId: number) =>
+    request<AnalysisSummary>("/api/analyses", { method: "POST", body: JSON.stringify({ bid_id: bidId }) }),
+  uploadTender: (form: FormData) => request<AnalysisSummary>("/api/analyses/upload", { method: "POST", body: form }),
+  rerunAnalysis: (id: number) => request<AnalysisSummary>(`/api/analyses/${id}/rerun`, { method: "POST" }),
+  deleteAnalysis: (id: number) => request<{ deleted: number }>(`/api/analyses/${id}`, { method: "DELETE" }),
+  library: () => request<{ items: LibraryItem[]; categories: { key: string; label: string }[] }>("/api/library"),
+  uploadLibrary: (form: FormData) => request<LibraryItem>("/api/library", { method: "POST", body: form }),
+  deleteLibrary: (id: number) => request<{ deleted: number }>(`/api/library/${id}`, { method: "DELETE" }),
   startRun: (notify: boolean) => request<{ started: boolean }>("/api/runs", { method: "POST", body: JSON.stringify({ notify }) }),
   settings: () => request<SettingsPayload>("/api/settings"),
   saveSettings: (values: Partial<SettingsValues>) =>

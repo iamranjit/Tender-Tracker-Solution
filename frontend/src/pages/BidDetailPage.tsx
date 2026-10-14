@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, Attachment, BidDetail, Feedback, Meta } from "../api";
 import { Countdown, EligibilityPill, ErrorBox, ScoreRing, Spinner, eligibilityTone, useAsync } from "../components";
 import { daysUntil, fmtDate, fmtDateTime, fmtTime, inr, inrShort, lakh } from "../format";
@@ -82,7 +82,8 @@ function Header({ bid, threshold, onFeedback }: { bid: BidDetail; threshold?: nu
         <ScoreRing score={bid.score} threshold={threshold} />
       </div>
       <div className="actions">
-        <a className="btn btn-primary" href={bid.doc_url} target="_blank" rel="noreferrer">Open bid on GeM ↗</a>
+        <PrepareProposal bid={bid} />
+        <a className="btn" href={bid.doc_url} target="_blank" rel="noreferrer">Open bid on GeM ↗</a>
         {bid.document?.has_local_pdf && (
           <a className="btn" href={`/api/bids/${bid.id}/pdf`} target="_blank" rel="noreferrer">Saved PDF</a>
         )}
@@ -270,7 +271,25 @@ function ScopeOfWork({ bid, onAttachments }: { bid: BidDetail; onAttachments: (a
         </dl>
       )}
 
-      <div className="section-label" style={{ marginTop: 0 }}>Items / services ({items.length})</div>
+      {bid.boq.length > 0 ? (
+        <>
+          <div className="section-label" style={{ marginTop: 0 }}>Bill of quantities ({bid.boq.length})</div>
+          <div style={{ overflowX: "auto", marginBottom: 6 }}>
+            <table className="grid">
+              <thead><tr><th>#</th><th>Item</th><th style={{ width: "45%" }}>Description</th><th>Qty</th><th>Unit</th></tr></thead>
+              <tbody>
+                {bid.boq.map((b, i) => (
+                  <tr key={i}>
+                    <td>{b.item_no}</td><td style={{ fontWeight: 500 }}>{b.title}</td><td className="small">{b.description}</td>
+                    <td>{b.quantity ?? (b.quantity_text || "—")}</td><td>{b.unit}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      ) : null}
+      <div className="section-label" style={{ marginTop: bid.boq.length ? 18 : 0 }}>Items / services ({items.length})</div>
       <ul className="items-list">
         {items.slice(0, 40).map((it, i) => <li key={i}>{it}</li>)}
       </ul>
@@ -454,5 +473,27 @@ function AllDetails({ bid }: { bid: BidDetail }) {
         Analysed {fmtDateTime(bid.document?.fetched_at)} · matched search: {bid.search_terms.join(", ") || "—"}
       </div>
     </div>
+  );
+}
+
+function PrepareProposal({ bid }: { bid: BidDetail }) {
+  const nav = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const existing = bid.workspaces[0];
+  if (existing) {
+    return <Link className="btn btn-primary" to={`/proposals/${existing.id}`}>Open proposal workspace</Link>;
+  }
+  return (
+    <button className="btn btn-primary" disabled={busy} onClick={async () => {
+      setBusy(true);
+      try {
+        const a = await api.createAnalysis(bid.id);
+        nav(`/proposals/${a.id}`);
+      } catch {
+        setBusy(false);
+      }
+    }}>
+      {busy ? <><Spinner /> Starting…</> : "Prepare proposal"}
+    </button>
   );
 }

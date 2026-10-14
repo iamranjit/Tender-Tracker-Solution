@@ -7,6 +7,9 @@ import BidsPage from "./pages/BidsPage";
 import BidDetailPage from "./pages/BidDetailPage";
 import RunsPage from "./pages/RunsPage";
 import SettingsPage from "./pages/SettingsPage";
+import ProposalsPage from "./pages/ProposalsPage";
+import WorkspacePage from "./pages/WorkspacePage";
+import LibraryPage from "./pages/LibraryPage";
 
 export default function App() {
   const meta = useAsync(() => api.meta(), []);
@@ -29,6 +32,8 @@ export default function App() {
             <NavLink to="/" end>
               Tenders
             </NavLink>
+            <NavLink to="/proposals">Proposals</NavLink>
+            <NavLink to="/library">Library</NavLink>
             <NavLink to="/runs">Runs</NavLink>
             <NavLink to="/settings">Settings</NavLink>
           </nav>
@@ -49,6 +54,9 @@ export default function App() {
         <Routes>
           <Route path="/" element={<BidsPage meta={meta.data} />} />
           <Route path="/bids/:id" element={<BidDetailPage meta={meta.data} />} />
+          <Route path="/proposals" element={<ProposalsPage />} />
+          <Route path="/proposals/:id" element={<WorkspacePage />} />
+          <Route path="/library" element={<LibraryPage />} />
           <Route path="/runs" element={<RunsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<div className="empty">Page not found. <Link to="/">Back to tenders</Link></div>} />
